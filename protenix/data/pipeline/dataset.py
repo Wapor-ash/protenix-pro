@@ -32,6 +32,8 @@ from protenix.data.constraint.constraint_featurizer import ConstraintFeatureGene
 from protenix.data.core.featurizer import Featurizer
 from protenix.data.msa.msa_featurizer import MSAFeaturizer
 from protenix.data.pipeline.data_pipeline import DataPipeline
+from protenix.data.esm.esm_featurizer import ESMFeaturizer
+from protenix.data.rnalm.rnalm_featurizer import RiNALMoFeaturizer
 from protenix.data.template.template_featurizer import TemplateFeaturizer
 from protenix.data.tokenizer import TokenArray
 from protenix.data.utils import (
@@ -121,6 +123,19 @@ class BaseSingleDataset(Dataset):
 
         self.msa_featurizer = msa_featurizer
         self.template_featurizer = template_featurizer
+
+        # === ESM (Protein Language Model) Featurizer ===
+        self.esm_featurizer = kwargs.get("esm_featurizer", None)
+
+        # === RNA LM (RiNALMo) Featurizer ===
+        self.rnalm_featurizer = kwargs.get("rnalm_featurizer", None)
+        self.rnalm_separate_dna = kwargs.get("rnalm_separate_dna", False)
+
+        # === RNA Template Featurizer ===
+        self.rna_template_featurizer = kwargs.get("rna_template_featurizer", None)
+
+        # === RibonanzaNet2 Tokenizer ===
+        self.ribonanza_tokenizer = kwargs.get("ribonanza_tokenizer", None)
 
         # Read data
         self.indices_list = self.read_indices_list(indices_fpath)
@@ -260,11 +275,11 @@ class BaseSingleDataset(Dataset):
         """
         if self.name:
             logger.info("-" * 10 + f" Dataset {self.name}" + "-" * 10)
-        col1 = df["mol_1_type"].astype(str)
-        col2 = df["mol_2_type"].astype(str).str.replace("nan", "intra", regex=False)
+        col1 = df["mol_1_type"].fillna("unknown").astype(str)
+        col2 = df["mol_2_type"].fillna("intra").astype(str)
         lo = np.where(col1.values <= col2.values, col1.values, col2.values)
         hi = np.where(col1.values <= col2.values, col2.values, col1.values)
-        df["mol_group_type"] = np.char.add(np.char.add(lo, "_"), hi)
+        df["mol_group_type"] = np.char.add(np.char.add(lo.astype(str), "_"), hi.astype(str))
 
         group_size_dict = dict(df["mol_group_type"].value_counts())
         for i, n_i in group_size_dict.items():
@@ -513,6 +528,65 @@ class BaseSingleDataset(Dataset):
             is_spatial_crop="spatial" in crop_method.lower(),
             max_entity_mol_id=max_entity_mol_id,
         )
+
+        # === ESM (Protein Language Model) Embedding Features ===
+        if self.esm_featurizer is not None:
+            x_esm = self.esm_featurizer(
+                token_array=cropped_token_array,
+                atom_array=cropped_atom_array,
+                bioassembly_dict=bioassembly_dict,
+                inference_mode=False,
+            )
+            feat["esm_token_embedding"] = x_esm
+
+        # === RNA LM (RiNALMo) Embedding Features ===
+        if self.rnalm_featurizer is not None:
+            if self.rnalm_separate_dna:
+                # Separate mode: get independent RNA and DNA tensors
+                result = self.rnalm_featurizer(
+                    token_array=cropped_token_array,
+                    atom_array=cropped_atom_array,
+                    bioassembly_dict=bioassembly_dict,
+                    inference_mode=False,
+                    return_separate=True,
+                )
+                # Only set keys returned by featurizer (respects use_rna/use_dna)
+                if "rna_llm_embedding" in result:
+                    feat["rna_llm_embedding"] = result["rna_llm_embedding"]
+                if "dna_llm_embedding" in result:
+                    feat["dna_llm_embedding"] = result["dna_llm_embedding"]
+            else:
+                # Combined mode (legacy): single tensor with DNA zero-padded
+                x_rnalm = self.rnalm_featurizer(
+                    token_array=cropped_token_array,
+                    atom_array=cropped_atom_array,
+                    bioassembly_dict=bioassembly_dict,
+                    inference_mode=False,
+                    return_separate=False,
+                )
+                feat["rnalm_token_embedding"] = x_rnalm
+        # === End RNA LM ===
+
+        # === RNA Template Features ===
+        if self.rna_template_featurizer is not None:
+            rna_template_features = self.rna_template_featurizer(
+                token_array=cropped_token_array,
+                atom_array=cropped_atom_array,
+                bioassembly_dict=bioassembly_dict,
+                inference_mode=False,
+            )
+            for key, value in rna_template_features.items():
+                feat[key] = torch.from_numpy(value) if isinstance(value, np.ndarray) else value
+        # === End RNA Template ===
+
+        # === RibonanzaNet2 Tokenizer ===
+        if self.ribonanza_tokenizer is not None:
+            ribo_result = self.ribonanza_tokenizer(
+                token_array=cropped_token_array,
+                atom_array=cropped_atom_array,
+            )
+            feat.update(ribo_result)
+        # === End RibonanzaNet2 Tokenizer ===
 
         # Basic info, e.g. dimension related items
         basic_info = {
@@ -910,6 +984,216 @@ def get_template_featurizer(
     return TemplateFeaturizer(**template_args)
 
 
+# === ESM (Protein Language Model) Featurizer ===
+def get_esm_featurizer(configs: ConfigDict) -> Optional[ESMFeaturizer]:
+    """
+    Creates an ESMFeaturizer if esm is enabled and embedding_dir is configured.
+    """
+    esm_info = configs.get("esm", {})
+    if not esm_info.get("enable", False):
+        return None
+
+    embedding_dir = esm_info.get("embedding_dir", "")
+    sequence_fpath = esm_info.get("sequence_fpath", "")
+
+    if not embedding_dir or not sequence_fpath:
+        logger.info(
+            "ESM enabled but no embedding_dir/sequence_fpath configured. "
+            "Protein tokens will get zeros."
+        )
+        return None
+
+    if not os.path.exists(embedding_dir) or not os.path.exists(sequence_fpath):
+        logger.warning(
+            f"ESM embedding_dir ({embedding_dir}) or sequence_fpath ({sequence_fpath}) "
+            f"not found. Protein tokens will get zeros."
+        )
+        return None
+
+    logger.info(
+        f"ESM featurizer enabled: embedding_dir={embedding_dir}, "
+        f"sequence_fpath={sequence_fpath}, dim={esm_info.get('embedding_dim', 2560)}"
+    )
+    return ESMFeaturizer(
+        embedding_dir=embedding_dir,
+        sequence_fpath=sequence_fpath,
+        embedding_dim=esm_info.get("embedding_dim", 2560),
+        error_dir=esm_info.get("error_dir", None),
+    )
+
+
+# === RNA LM (RiNALMo) Featurizer ===
+def get_rnalm_featurizer(configs: ConfigDict) -> Optional[RiNALMoFeaturizer]:
+    """
+    Creates a RiNALMoFeaturizer if rnalm is enabled and embedding paths are configured.
+    Supports RNA-only, DNA-only, and combined modes via use_rna_embed/use_dna_embed toggles.
+
+    Args:
+        configs: Configuration dict containing rnalm settings.
+
+    Returns:
+        A RiNALMoFeaturizer instance if enabled, otherwise None.
+    """
+    rnalm_info = configs.get("rnalm", {})
+    if not rnalm_info.get("enable", False):
+        return None
+
+    use_rna = rnalm_info.get("use_rna_embed", True)
+    use_dna = rnalm_info.get("use_dna_embed", True)
+
+    if not use_rna and not use_dna:
+        logger.warning(
+            "rnalm.enable=True but both use_rna_embed and use_dna_embed are False. Disabling."
+        )
+        return None
+
+    embedding_dir = rnalm_info.get("embedding_dir", "") if use_rna else ""
+    sequence_fpath = rnalm_info.get("sequence_fpath", "") if use_rna else ""
+    dna_embedding_dir = rnalm_info.get("dna_embedding_dir", "") if use_dna else ""
+    dna_sequence_fpath = rnalm_info.get("dna_sequence_fpath", "") if use_dna else ""
+    dna_embedding_dim = rnalm_info.get("dna_embedding_dim", 1024)
+    separate_dna = rnalm_info.get("separate_dna_projection", False)
+
+    # Fail-fast: if use_rna/use_dna is True but paths are missing, raise immediately.
+    # Silent fallback to zeros caused silent training with random noise in past.
+    if use_rna and (not embedding_dir or not sequence_fpath):
+        raise ValueError(
+            "rnalm.enable=True and use_rna_embed=True but RNA embedding paths are missing. "
+            f"embedding_dir='{embedding_dir}', sequence_fpath='{sequence_fpath}'. "
+            "Either provide valid paths or set rnalm.use_rna_embed=false."
+        )
+
+    if use_dna and (not dna_embedding_dir or not dna_sequence_fpath):
+        raise ValueError(
+            "rnalm.enable=True and use_dna_embed=True but DNA embedding paths are missing. "
+            f"dna_embedding_dir='{dna_embedding_dir}', dna_sequence_fpath='{dna_sequence_fpath}'. "
+            "Either provide valid paths or set rnalm.use_dna_embed=false."
+        )
+
+    if not use_rna and not separate_dna:
+        logger.warning(
+            "use_rna_embed=False with separate_dna_projection=False: DNA embeddings will be "
+            "zero-padded through the shared RNA-dim layer. Consider using "
+            "separate_dna_projection=True for better parameter efficiency."
+        )
+
+    logger.info(
+        f"RiNALMo featurizer enabled: use_rna={use_rna}, use_dna={use_dna}, "
+        f"embedding_dir={embedding_dir}, sequence_fpath={sequence_fpath}, "
+        f"dim={rnalm_info.get('embedding_dim', 1280)}, "
+        f"dna_embedding_dir={dna_embedding_dir}, dna_sequence_fpath={dna_sequence_fpath}, "
+        f"separate_dna_projection={separate_dna}, dna_embedding_dim={dna_embedding_dim}"
+    )
+    return RiNALMoFeaturizer(
+        embedding_dir=embedding_dir,
+        sequence_fpath=sequence_fpath,
+        embedding_dim=rnalm_info.get("embedding_dim", 1280),
+        error_dir=rnalm_info.get("error_dir", None),
+        dna_embedding_dir=dna_embedding_dir,
+        dna_sequence_fpath=dna_sequence_fpath,
+        dna_embedding_dim=dna_embedding_dim,
+        use_rna_embed=use_rna,
+        use_dna_embed=use_dna,
+    )
+# === End RNA LM ===
+
+
+# === RNA Template Featurizer Factory ===
+def get_rna_template_featurizer(configs):
+    """Create an RNATemplateFeaturizer if RNA template is enabled.
+
+    Supports two modes:
+      Online mode: search_results_path + cif_database_dir → build from CIF at training time
+      Offline mode: template_index_path + template_database_dir → load pre-built NPZ
+
+    Args:
+        configs: Configuration dict with rna_template section.
+
+    Returns:
+        RNATemplateFeaturizer instance or None.
+    """
+    rna_template_info = configs.get("rna_template", {})
+    if not rna_template_info.get("enable", False):
+        return None
+
+    template_database_dir = rna_template_info.get("template_database_dir", "")
+    template_index_path = rna_template_info.get("template_index_path", "")
+    max_rna_templates = rna_template_info.get("max_rna_templates", 4)
+    rna3db_metadata_path = rna_template_info.get("rna3db_metadata_path", "")
+    search_results_path = rna_template_info.get("search_results_path", "")
+    cif_database_dir = rna_template_info.get("cif_database_dir", "")
+    manual_template_hints_path = rna_template_info.get("manual_template_hints_path", "")
+
+    # Determine mode
+    online_mode = bool(search_results_path and cif_database_dir)
+
+    if online_mode:
+        # Online mode: validate search_results + cif_dir
+        if not os.path.exists(search_results_path):
+            raise FileNotFoundError(
+                f"rna_template.search_results_path='{search_results_path}' does not exist."
+            )
+        if not os.path.isdir(cif_database_dir):
+            raise FileNotFoundError(
+                f"rna_template.cif_database_dir='{cif_database_dir}' does not exist."
+            )
+        logger.info(
+            f"RNA template featurizer: ONLINE mode — "
+            f"search_results={search_results_path}, cif_dir={cif_database_dir}, "
+            f"max_templates={max_rna_templates}"
+        )
+    else:
+        # Offline mode: validate template_database_dir + template_index_path
+        if not template_database_dir or not template_index_path:
+            raise ValueError(
+                "rna_template.enable=True but neither online mode (search_results_path + "
+                "cif_database_dir) nor offline mode (template_database_dir + template_index_path) "
+                "is configured. Provide valid paths or set rna_template.enable=false."
+            )
+        if not os.path.isdir(template_database_dir):
+            raise FileNotFoundError(
+                f"rna_template.template_database_dir='{template_database_dir}' does not exist."
+            )
+        logger.info(
+            f"RNA template featurizer: OFFLINE mode — "
+            f"database_dir={template_database_dir}, index_path={template_index_path}, "
+            f"max_templates={max_rna_templates}"
+        )
+
+    from protenix.data.rna_template.rna_template_featurizer import RNATemplateFeaturizer
+
+    return RNATemplateFeaturizer(
+        template_database_dir=template_database_dir,
+        template_index_path=template_index_path,
+        max_templates=max_rna_templates,
+        rna3db_metadata_path=rna3db_metadata_path,
+        search_results_path=search_results_path,
+        cif_database_dir=cif_database_dir,
+        manual_template_hints_path=manual_template_hints_path,
+    )
+# === End RNA Template ===
+
+
+# === RibonanzaNet2 Tokenizer ===
+def get_ribonanza_tokenizer(configs):
+    """Create a RibonanzaTokenizer if RibonanzaNet2 is enabled.
+
+    Args:
+        configs: Configuration dict with ribonanzanet2 section.
+
+    Returns:
+        RibonanzaTokenizer instance or None.
+    """
+    rnet2_info = configs.get("ribonanzanet2", {})
+    if not rnet2_info.get("enable", False):
+        return None
+
+    from protenix.data.ribonanza.ribonanza_tokenizer import RibonanzaTokenizer
+    logger.info("RibonanzaNet2 tokenizer enabled for training.")
+    return RibonanzaTokenizer()
+# === End RibonanzaNet2 Tokenizer ===
+
+
 class WeightedMultiDataset(Dataset):
     """
     A weighted dataset composed of multiple datasets with weights.
@@ -1033,8 +1317,11 @@ def calc_weights_for_df(
         A pandas DataFrame with an column 'weights' containing the calculated weights.
     """
     # Specific to assembly, and entities (chain or interface)
-    e1 = indices_df["entity_1_id"].astype(str).values
-    e2 = indices_df["entity_2_id"].astype(str).values
+    # Keep the old apply/lambda semantics for missing entity IDs:
+    # read_indices_csv() normalizes missing IDs to None, and the previous code
+    # effectively used the literal string "None" during sorting/concatenation.
+    e1 = indices_df["entity_1_id"].fillna("None").astype(str).to_numpy()
+    e2 = indices_df["entity_2_id"].fillna("None").astype(str).to_numpy()
     lo = np.where(e1 <= e2, e1, e2)
     hi = np.where(e1 <= e2, e2, e1)
     indices_df["pdb_sorted_entity_id"] = (
@@ -1149,6 +1436,11 @@ def get_datasets(
             "template_featurizer": get_template_featurizer(
                 configs, dataset_name, stage
             ),
+            "esm_featurizer": get_esm_featurizer(configs),  # === ESM protein ===
+            "rnalm_featurizer": get_rnalm_featurizer(configs),  # === RNA LM ===
+            "rnalm_separate_dna": configs.get("rnalm", {}).get("separate_dna_projection", False),
+            "rna_template_featurizer": get_rna_template_featurizer(configs),  # === RNA Template ===
+            "ribonanza_tokenizer": get_ribonanza_tokenizer(configs),  # === RibonanzaNet2 ===
             "lig_atom_rename": config_dict.get("lig_atom_rename", False),
             "shuffle_mols": config_dict.get("shuffle_mols", False),
             "shuffle_sym_ids": config_dict.get("shuffle_sym_ids", False),

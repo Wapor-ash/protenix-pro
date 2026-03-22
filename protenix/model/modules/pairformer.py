@@ -841,16 +841,20 @@ class MSAModule(nn.Module):
             torch.Tensor: the updated z
                 [..., N_token, N_token, c_z]
         """
-        # If n_blocks < 1, return z
+        # === MSA Fallback Logic (matches RNAPro pattern) ===
+        # 1. Architecture disabled (n_blocks < 1) → skip MSA entirely
         if self.n_blocks < 1:
             return z
 
+        # 2. MSA data not present → graceful fallback (RNA-only or missing files)
+        #    This is the RNAPro pattern: if no MSA data, skip silently.
         if "msa" not in input_feature_dict:
             return z
-        # Check msa shape!
-        # IndexError: Dimension out of range (expected to be in range of [-1, 0], but got -2)
+
+        # 3. Malformed MSA tensor (e.g., dummy/empty) → graceful fallback
         if input_feature_dict["msa"].dim() < 2:
             return z
+        # === End MSA Fallback Logic ===
         msa_feat = sample_msa_feature_dict_random_without_replacement(
             feat_dict=input_feature_dict,
             dim_dict={feat_name: -2 for feat_name in self.input_feature},
@@ -918,18 +922,16 @@ class MSAModule(nn.Module):
 
 class TemplateEmbedder(nn.Module):
     """
-    Implements Algorithm 16 in AF3
+    Implements Algorithm 16 in AF3, refactored to match RNAPro's integration pattern.
 
-    Args:
-        n_blocks (int, optional): number of blocks for TemplateEmbedder. Defaults to 2.
-        c (int, optional): hidden dim of TemplateEmbedder. Defaults to 64.
-        c_z (int, optional): hidden dim [for pair embedding]. Defaults to 128.
-        num_intermediate_factor (int, optional): number of intermediate factor for transition. Defaults to 2.
-        dropout (float, optional): dropout ratio for PairformerStack. Defaults to 0.25.
-            Note this value is missed in Algorithm 16, so we use default ratio for Pairformer
-        blocks_per_ckpt (int, optional): number of TemplateEmbedder/Pairformer blocks in each activation
-            checkpoint. Defaults to None.
-        hidden_scale_up (bool, optional): whether scale up the hidden if c_z scales. Defaults to False.
+    Integration follows RNAPro:
+    - s_inputs outer product for pair initialization
+    - Trunk s and z passed into dedicated PairformerStack (c_s=c_s, c_z=c_z)
+    - Per-template: z_pair = z_init_outer + z + feature_proj → pairformer → layernorm
+    - Accumulate, average, then zero-init final_linear → output
+    - Feature computation (108-dim) is preserved from Protenix (full-atom, not C1'-only)
+
+    Supports both protein and RNA templates with separate projectors.
     """
 
     def __init__(
@@ -937,15 +939,20 @@ class TemplateEmbedder(nn.Module):
         n_blocks: int = 2,
         c: int = 64,
         c_z: int = 128,
+        c_s: int = 384,
+        c_s_inputs: int = 449,
         num_intermediate_factor: int = 2,
         dropout: float = 0.25,
         blocks_per_ckpt: Optional[int] = None,
         hidden_scale_up: bool = False,
+        rna_template_configs: Optional[dict] = None,
     ) -> None:
         super(TemplateEmbedder, self).__init__()
         self.n_blocks = n_blocks
         self.c = c
         self.c_z = c_z
+        self.c_s = c_s
+        self.c_s_inputs = c_s_inputs
         self.input_feature1 = {
             "template_distogram": 39,
             "template_backbone_frame_mask": 1,
@@ -959,29 +966,74 @@ class TemplateEmbedder(nn.Module):
         self.distogram = {"max_bin": 50.75, "min_bin": 3.25, "no_bins": 39}
         self.inf = 100000.0
 
-        self.linear_no_bias_z = LinearNoBias(in_features=self.c_z, out_features=self.c)
-        self.layernorm_z = LayerNorm(self.c_z)
-        self.linear_no_bias_a = LinearNoBias(
-            in_features=sum(self.input_feature1.values())
-            + sum(self.input_feature2.values()),
-            out_features=self.c,
+        # Feature dimension (108 for Protenix's full-atom template features)
+        feat_dim = (
+            sum(self.input_feature1.values())
+            + sum(self.input_feature2.values())
         )
+
+        # === RNAPro-style integration layers ===
+        # s_inputs outer product for pair initialization
+        self.linear_no_bias_s1 = LinearNoBias(
+            in_features=self.c_s_inputs, out_features=self.c_z
+        )
+        self.linear_no_bias_s2 = LinearNoBias(
+            in_features=self.c_s_inputs, out_features=self.c_z
+        )
+        # s LayerNorm for single representation input to pairformer
+        self.input_s_ln = LayerNorm(self.c_s)
+
+        # Feature projector: 108-dim template features → c_z
+        self.linear_no_bias_a = LinearNoBias(
+            in_features=feat_dim, out_features=self.c_z
+        )
+
+        # Dedicated PairformerStack (RNAPro style: c_s, c_z at full trunk dims)
         self.pairformer_stack = PairformerStack(
-            c_s=0,
-            c_z=c,
+            c_s=self.c_s,
+            c_z=self.c_z,
             n_blocks=self.n_blocks,
             num_intermediate_factor=num_intermediate_factor,
             dropout=dropout,
             blocks_per_ckpt=blocks_per_ckpt,
             hidden_scale_up=hidden_scale_up,
         )
-        self.layernorm_v = LayerNorm(self.c)
-        self.relu = nn.ReLU()
-        self.linear_no_bias_u = LinearNoBias(in_features=self.c, out_features=self.c_z)
+
+        # LayerNorm after pairformer per template
+        self.layernorm_z = LayerNorm(self.c_z)
+
+        # Zero-init final linear (RNAPro style: outputs zeros initially)
+        self.final_linear_no_bias = LinearNoBias(
+            in_features=self.c_z, out_features=self.c_z
+        )
+        with torch.no_grad():
+            nn.init.zeros_(self.final_linear_no_bias.weight)
+
+        # === RNA Template: separate projector for RNA template features ===
+        rna_cfg = rna_template_configs or {}
+        self.rna_template_enable = rna_cfg.get("enable", False)
+        self.rna_projector_init = rna_cfg.get("projector_init", "protein")
+        if self.rna_template_enable:
+            self.linear_no_bias_a_rna = LinearNoBias(
+                in_features=feat_dim,
+                out_features=self.c_z,
+            )
+            if self.rna_projector_init == "zero":
+                nn.init.zeros_(self.linear_no_bias_a_rna.weight)
+            else:
+                with torch.no_grad():
+                    self.linear_no_bias_a_rna.weight.copy_(self.linear_no_bias_a.weight)
+                alpha_init = rna_cfg.get("alpha_init", 0.01)
+                self.rna_template_alpha = nn.Parameter(
+                    torch.tensor(float(alpha_init))
+                )
+        # === End RNA Template ===
 
     def forward(
         self,
         input_feature_dict: dict[str, Any],
+        s_inputs: torch.Tensor,
+        s: torch.Tensor,
         z: torch.Tensor,
         pair_mask: torch.Tensor = None,
         triangle_attention: str = "torch",
@@ -990,109 +1042,178 @@ class TemplateEmbedder(nn.Module):
         chunk_size: Optional[int] = None,
     ) -> torch.Tensor:
         """
+        RNAPro-style template forward: s_inputs outer product init + z + features.
+
         Args:
-            input_feature_dict (dict[str, Any]): input feature dict
-            z (torch.Tensor): pair embedding
-                [..., N_token, N_token, c_z]
-            pair_mask (torch.Tensor, optional): pair masking. Default to None.
-                [..., N_token, N_token]
-            triangle_attention: Triangle attention implementation type.
-                - "torch" (default): PyTorch native implementation
-                - "triattention": Optimized tri-attention module
-                - "deepspeed": DeepSpeed's fused attention kernel
+            input_feature_dict: input feature dict with template features
+            s_inputs: single input features [..., N_token, c_s_inputs=449]
+            s: trunk single representation [..., N_token, c_s=384]
+            z: pair embedding [..., N_token, N_token, c_z=128]
+            pair_mask: pair masking [..., N_token, N_token]
 
         Returns:
-            torch.Tensor: the template feature
-                [..., N_token, N_token, c_z]
+            torch.Tensor: template contribution [..., N_token, N_token, c_z]
         """
-        # Do not use TemplateEmbedder by setting n_blocks=0
-        if "template_aatype" not in input_feature_dict or self.n_blocks < 1:
-            # Compatible with the Protenix 0.5.0 model series
+        has_prot_template = "template_aatype" in input_feature_dict
+        has_rna_template = (
+            self.rna_template_enable
+            and "rna_template_aatype" in input_feature_dict
+        )
+
+        if (not has_prot_template and not has_rna_template) or self.n_blocks < 1:
             return 0
+
         asym_id = input_feature_dict["asym_id"]
         multichain_mask = (asym_id[:, None] == asym_id[None, :]).to(z.dtype)
-
-        num_residues = z.shape[0]
-        # determine whether the number of templates is the configured maximum value, otherwise error out
-        num_templates = input_feature_dict["template_aatype"].shape[0]
-        query_num_channels = z.shape[-1]
 
         if pair_mask is None:
             pair_mask = z.new_ones(z.shape[:-1])
 
-        z = self.layernorm_z(z)
+        # RNAPro-style: s_inputs outer product for pair initialization (computed once)
+        z_init_outer = (
+            self.linear_no_bias_s1(s_inputs)[..., None, :, :]
+            + self.linear_no_bias_s2(s_inputs)[..., None, :]
+        )  # [..., N_token, N_token, c_z]
+
+        # Prepare single representation for pairformer
+        s_template = self.input_s_ln(torch.clamp(s, min=-512, max=512))
+
         u = 0
-        for template_id in range(num_templates):
-            u = u + self.single_template_forward(
-                template_id=template_id,
-                input_feature_dict=input_feature_dict,
-                z=z,
-                pair_mask=pair_mask,
-                multichain_mask=multichain_mask,
-                triangle_attention=triangle_attention,
-                triangle_multiplicative=triangle_multiplicative,
-                inplace_safe=inplace_safe,
-                chunk_size=chunk_size,
-            )
-        u = u / (1e-7 + num_templates)
-        u = self.linear_no_bias_u(self.relu(u))
-        assert u.shape == (num_residues, num_residues, query_num_channels)
+        total_templates = 0
+
+        # Process protein templates
+        if has_prot_template:
+            num_prot_templates = input_feature_dict["template_aatype"].shape[0]
+            for template_id in range(num_prot_templates):
+                u = u + self._single_template_forward(
+                    template_id=template_id,
+                    input_feature_dict=input_feature_dict,
+                    z_init_outer=z_init_outer,
+                    z=z,
+                    s=s_template,
+                    pair_mask=pair_mask,
+                    multichain_mask=multichain_mask,
+                    projector=self.linear_no_bias_a,
+                    prefix="",
+                    triangle_attention=triangle_attention,
+                    triangle_multiplicative=triangle_multiplicative,
+                    inplace_safe=inplace_safe,
+                    chunk_size=chunk_size,
+                )
+            total_templates += num_prot_templates
+
+        # Process RNA templates
+        if has_rna_template:
+            rna_projector = self.linear_no_bias_a_rna
+            num_rna_templates = input_feature_dict["rna_template_aatype"].shape[0]
+            rna_block_mask = input_feature_dict.get("rna_template_block_mask", None)
+            for template_id in range(num_rna_templates):
+                rna_v = self._single_template_forward(
+                    template_id=template_id,
+                    input_feature_dict=input_feature_dict,
+                    z_init_outer=z_init_outer,
+                    z=z,
+                    s=s_template,
+                    pair_mask=pair_mask,
+                    multichain_mask=multichain_mask,
+                    projector=rna_projector,
+                    prefix="rna_",
+                    rna_block_mask=rna_block_mask,
+                    triangle_attention=triangle_attention,
+                    triangle_multiplicative=triangle_multiplicative,
+                    inplace_safe=inplace_safe,
+                    chunk_size=chunk_size,
+                )
+                if self.rna_projector_init == "zero" or not hasattr(self, "rna_template_alpha"):
+                    u = u + rna_v
+                else:
+                    u = u + self.rna_template_alpha * rna_v
+            total_templates += num_rna_templates
+
+        if total_templates == 0:
+            return 0
+
+        # RNAPro-style: average then zero-init final linear
+        u = u / max(total_templates, 1)
+        u = self.final_linear_no_bias(u)
         return u
 
-    def single_template_forward(
+    def _single_template_forward(
         self,
         template_id: int,
         input_feature_dict: dict[str, Any],
+        z_init_outer: torch.Tensor,
         z: torch.Tensor,
-        pair_mask: Optional[torch.Tensor] = None,
-        multichain_mask: Optional[torch.Tensor] = None,
+        s: torch.Tensor,
+        pair_mask: Optional[torch.Tensor],
+        multichain_mask: Optional[torch.Tensor],
+        projector: LinearNoBias,
+        prefix: str = "",
+        rna_block_mask: Optional[torch.Tensor] = None,
         triangle_attention: str = "torch",
         triangle_multiplicative: str = "torch",
         inplace_safe: bool = False,
         chunk_size: Optional[int] = None,
     ) -> torch.Tensor:
+        """Unified template forward for both protein and RNA templates.
+
+        Uses 108-dim Protenix features but RNAPro-style integration:
+        z_pair = z_init_outer + z + projector(features) → pairformer(s, z_pair) → layernorm
+
+        Args:
+            prefix: "" for protein templates, "rna_" for RNA templates
+            projector: linear_no_bias_a for protein, linear_no_bias_a_rna for RNA
+        """
+        # Build effective mask
+        effective_mask = multichain_mask
+        if rna_block_mask is not None:
+            effective_mask = effective_mask * rna_block_mask
+
         to_concat = []
 
-        dgram = input_feature_dict["template_distogram"][
-            template_id
-        ]  # [N_token, N_token, 39]
-        pseudo_beta_mask_2d = input_feature_dict["template_pseudo_beta_mask"][
-            template_id
-        ]
-        dgram = dgram * multichain_mask[..., None] * pair_mask[..., None]
-        pseudo_beta_mask_2d = (
-            pseudo_beta_mask_2d * multichain_mask * pair_mask
-        )  # [N_token, N_token]
+        # Distogram features
+        dgram = input_feature_dict[f"{prefix}template_distogram"][template_id]
+        pseudo_beta_mask_2d = input_feature_dict[f"{prefix}template_pseudo_beta_mask"][template_id]
+        dgram = dgram * effective_mask[..., None] * pair_mask[..., None]
+        pseudo_beta_mask_2d = pseudo_beta_mask_2d * effective_mask * pair_mask
         to_concat.append(dgram)
         to_concat.append(pseudo_beta_mask_2d.unsqueeze(-1))
 
-        aatype = input_feature_dict["template_aatype"][template_id]  # [N_token]
-        aatype = F.one_hot(aatype, num_classes=len(STD_RESIDUES_WITH_GAP))
-        to_concat.append(expand_at_dim(aatype, dim=-3, n=z.shape[0]))
-        to_concat.append(expand_at_dim(aatype, dim=-2, n=z.shape[0]))
+        # Residue type features
+        aatype = input_feature_dict[f"{prefix}template_aatype"][template_id]
+        aatype = F.one_hot(aatype.long(), num_classes=len(STD_RESIDUES_WITH_GAP))
+        aatype_row = expand_at_dim(aatype, dim=-3, n=z.shape[0])
+        aatype_col = expand_at_dim(aatype, dim=-2, n=z.shape[0])
+        if prefix == "rna_":
+            aatype_row = aatype_row * effective_mask[..., None] * pair_mask[..., None]
+            aatype_col = aatype_col * effective_mask[..., None] * pair_mask[..., None]
+        to_concat.append(aatype_row)
+        to_concat.append(aatype_col)
 
-        unit_vector = input_feature_dict["template_unit_vector"][template_id]
-        unit_vector = (
-            unit_vector * multichain_mask[..., None] * pair_mask[..., None]
-        )  # [N_token, N_token, 3]
+        # Unit vector features
+        unit_vector = input_feature_dict[f"{prefix}template_unit_vector"][template_id]
+        unit_vector = unit_vector * effective_mask[..., None] * pair_mask[..., None]
         to_concat.append(unit_vector)
 
-        backbone_mask_2d = input_feature_dict["template_backbone_frame_mask"][
-            template_id
-        ]
-        backbone_mask_2d = backbone_mask_2d * multichain_mask * pair_mask
+        # Backbone frame mask
+        backbone_mask_2d = input_feature_dict[f"{prefix}template_backbone_frame_mask"][template_id]
+        backbone_mask_2d = backbone_mask_2d * effective_mask * pair_mask
         to_concat.append(backbone_mask_2d.unsqueeze(-1))
 
-        at = torch.concat(to_concat, dim=-1)
-        v = self.linear_no_bias_z(z) + self.linear_no_bias_a(at)
-        _, v = self.pairformer_stack(
-            s=None,
-            z=v,
+        at = torch.concat(to_concat, dim=-1)  # [..., N_token, N_token, 108]
+
+        # RNAPro-style: z_pair = z_init_outer + z + feature_projection
+        z_pair = z_init_outer + z + projector(at)
+
+        # Process through dedicated PairformerStack
+        _, z_pair = self.pairformer_stack(
+            s=s,
+            z=z_pair,
             pair_mask=pair_mask,
             triangle_multiplicative=triangle_multiplicative,
             triangle_attention=triangle_attention,
             inplace_safe=inplace_safe,
             chunk_size=chunk_size,
         )
-        v = self.layernorm_v(v)
-        return v
+        z_pair = self.layernorm_z(z_pair)
+        return z_pair

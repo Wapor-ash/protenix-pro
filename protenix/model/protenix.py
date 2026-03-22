@@ -43,6 +43,12 @@ from protenix.model.modules.pairformer import (
     TemplateEmbedder,
 )
 from protenix.model.modules.primitives import LinearNoBias
+from protenix.model.modules.ribonanzanet import (
+    RibonanzaNet,
+    load_config_from_yaml,
+    GatedSequenceFeatureInjector,
+    GatedPairwiseFeatureInjector,
+)
 from protenix.model.triangular.layers import LayerNorm
 from protenix.model.utils import simple_merge_dict_list
 from protenix.utils.logger import get_logger
@@ -118,13 +124,23 @@ class Protenix(nn.Module):
 
         # Model
         esm_configs = configs.get("esm", {})  # This is used in InputFeatureEmbedder
+        rnalm_configs_for_embedder = configs.get("rnalm", {})
         self.input_embedder = InputFeatureEmbedder(
-            **configs.model.input_embedder, esm_configs=esm_configs
+            **configs.model.input_embedder,
+            esm_configs=esm_configs,
+            rnalm_configs=rnalm_configs_for_embedder,
         )
         self.relative_position_encoding = RelativePositionEncoding(
             **configs.model.relative_position_encoding
         )
-        self.template_embedder = TemplateEmbedder(**configs.model.template_embedder)
+        # Pass RNA template configs to TemplateEmbedder if enabled
+        rna_template_configs = configs.get("rna_template", {})
+        if not rna_template_configs.get("enable", False):
+            rna_template_configs = None
+        self.template_embedder = TemplateEmbedder(
+            **configs.model.template_embedder,
+            rna_template_configs=rna_template_configs,
+        )
         self.msa_module = MSAModule(
             **configs.model.msa_module,
             msa_configs=configs.data.get("msa", {}),
@@ -133,7 +149,178 @@ class Protenix(nn.Module):
             **configs.model.constraint_embedder
         )
         self.pairformer_stack = PairformerStack(**configs.model.pairformer)
-        self.diffusion_module = DiffusionModule(**configs.model.diffusion_module)
+
+        # === RNA LM (RiNALMo) Embedding Integration ===
+        # injection_mode controls where RNA LLM embeddings are injected:
+        #   "diffusion" - at DiffusionConditioning (add to s_trunk)
+        #   "input"     - at InputFeatureEmbedder (add to s_inputs, like ESM)
+        #   "both"      - at both locations
+        rnalm_configs = configs.get("rnalm", {})
+        self.rnalm_enable = rnalm_configs.get("enable", False)
+        self.rnalm_configs = rnalm_configs
+        self.rnalm_injection_mode = rnalm_configs.get("injection_mode", "diffusion")
+        self.rnalm_separate_dna = rnalm_configs.get("separate_dna_projection", False)
+        self.rnalm_use_rna = rnalm_configs.get("use_rna_embed", True)
+        self.rnalm_use_dna = rnalm_configs.get("use_dna_embed", True)
+
+        # If both use_rna and use_dna are False, data layer won't produce embeddings.
+        # Sync model layer by disabling rnalm entirely to avoid creating orphan projection
+        # layers that expect embedding keys missing from input_feature_dict.
+        if self.rnalm_enable and not self.rnalm_use_rna and not self.rnalm_use_dna:
+            logger.warning(
+                "rnalm.enable=True but both use_rna_embed and use_dna_embed are False. "
+                "Disabling rnalm at model layer to stay consistent with data layer."
+            )
+            self.rnalm_enable = False
+
+        # Only pass rnalm_configs to DiffusionModule if diffusion injection is needed
+        diffusion_module_kwargs = dict(configs.model.diffusion_module)
+        if self.rnalm_enable and self.rnalm_injection_mode in ("diffusion", "both"):
+            diffusion_module_kwargs["rnalm_configs"] = rnalm_configs
+        else:
+            diffusion_module_kwargs["rnalm_configs"] = None
+        self.diffusion_module = DiffusionModule(**diffusion_module_kwargs)
+
+        # Only create diffusion-level projection + gates when injection_mode includes diffusion
+        if self.rnalm_enable and self.rnalm_injection_mode in ("diffusion", "both"):
+            rnalm_embedding_dim = rnalm_configs.get("embedding_dim", 1280)
+
+            if self.rnalm_separate_dna:
+                # === Separate RNA/DNA projections — only create needed ones ===
+                if self.rnalm_use_rna:
+                    self.rna_projection = LinearNoBias(
+                        in_features=rnalm_embedding_dim,
+                        out_features=configs.c_s,
+                    )
+                    nn.init.zeros_(self.rna_projection.weight)
+                if self.rnalm_use_dna:
+                    dna_embedding_dim = rnalm_configs.get("dna_embedding_dim", 1024)
+                    self.dna_projection = LinearNoBias(
+                        in_features=dna_embedding_dim,
+                        out_features=configs.c_s,
+                    )
+                    nn.init.zeros_(self.dna_projection.weight)
+                logger.info(
+                    f"Separate RNA/DNA diffusion projections: "
+                    f"use_rna={self.rnalm_use_rna} ({rnalm_embedding_dim}->{configs.c_s}), "
+                    f"use_dna={self.rnalm_use_dna} ({rnalm_configs.get('dna_embedding_dim', 1024)}->{configs.c_s})"
+                )
+            else:
+                # === Combined projection (legacy) ===
+                self.rnalm_projection = LinearNoBias(
+                    in_features=rnalm_embedding_dim,
+                    out_features=configs.c_s,
+                )
+                nn.init.zeros_(self.rnalm_projection.weight)
+
+            # === Gate mechanism for controlled LLM injection ===
+            self.rnalm_gate_mode = rnalm_configs.get("gate_mode", "none")
+            gate_init = rnalm_configs.get("gate_init_logit", -3.0)
+            if self.rnalm_gate_mode in ("scalar", "dual"):
+                self.rnalm_alpha_logit = nn.Parameter(
+                    torch.tensor(float(gate_init))
+                )
+            if self.rnalm_gate_mode in ("token", "dual"):
+                c_s = configs.c_s
+                self.rnalm_gate_mlp = nn.Sequential(
+                    nn.Linear(c_s, c_s // 4),
+                    nn.ReLU(),
+                    nn.Linear(c_s // 4, 1),
+                )
+                # Conservative init: gate outputs ~sigmoid(gate_init) ≈ 0.047
+                nn.init.zeros_(self.rnalm_gate_mlp[2].weight)
+                nn.init.constant_(self.rnalm_gate_mlp[2].bias, gate_init)
+            # === End gate mechanism ===
+
+            logger.info(
+                f"RNA LM diffusion injection enabled: "
+                f"fusion_method=add, "
+                f"gate_mode={self.rnalm_gate_mode}, "
+                f"injection_mode={self.rnalm_injection_mode}, "
+                f"separate_dna={self.rnalm_separate_dna}"
+            )
+        else:
+            self.rnalm_gate_mode = "none"
+
+        if self.rnalm_enable:
+            logger.info(
+                f"RNA LM injection_mode={self.rnalm_injection_mode} "
+                f"(input={self.rnalm_injection_mode in ('input', 'both')}, "
+                f"diffusion={self.rnalm_injection_mode in ('diffusion', 'both')}, "
+                f"separate_dna={self.rnalm_separate_dna})"
+            )
+        # === End RNA LM ===
+
+        # === RibonanzaNet2 Integration (following RNAPro pattern) ===
+        rnet2_configs = configs.get("ribonanzanet2", {})
+        self.rnet2_enable = rnet2_configs.get("enable", False)
+        if self.rnet2_enable:
+            import os
+            rnet2_model_dir = rnet2_configs.get("model_dir", "")
+            config_path = os.path.join(rnet2_model_dir, "pairwise.yaml")
+            model_path = os.path.join(rnet2_model_dir, "pytorch_model_fsdp.bin")
+            rnet_config = load_config_from_yaml(config_path)
+            self.ribonanza_net = RibonanzaNet(rnet_config)
+            self.ribonanza_net.load_state_dict(
+                torch.load(model_path, map_location="cpu"), strict=True
+            )
+            # Freeze RibonanzaNet2 — never update its weights
+            for p in self.ribonanza_net.parameters():
+                p.requires_grad = False
+            self.ribonanza_net.eval()
+
+            # Learnable layer weights for aggregating 48 layers
+            n_layers = rnet_config.nlayers  # 48
+            self.layer_weights = nn.Parameter(
+                torch.linspace(0, 1, n_layers, dtype=torch.float32)
+            )
+            # Mask last layer initially (like RNAPro)
+            with torch.no_grad():
+                self.layer_weights[-1] = -1e18
+
+            # Projection MLPs: sequence features → c_s_inputs, pairwise → c_z
+            s_input_dim = configs.c_s_inputs  # 449
+            self.projection_sequence_features = nn.Sequential(
+                LinearNoBias(rnet_config.ninp, s_input_dim),
+                LayerNorm(s_input_dim),
+                nn.ReLU(),
+                LinearNoBias(s_input_dim, s_input_dim),
+                LayerNorm(s_input_dim),
+            )
+            self.projection_pairwise_features = nn.Sequential(
+                LinearNoBias(rnet_config.pairwise_dimension, configs.c_z),
+                LayerNorm(configs.c_z),
+                nn.ReLU(),
+                LinearNoBias(configs.c_z, configs.c_z),
+                LayerNorm(configs.c_z),
+            )
+
+            # Gated injectors
+            gate_type = rnet2_configs.get("gate_type", "channel")
+            self.gated_sequence_feature_injector = GatedSequenceFeatureInjector(
+                c_s_new=s_input_dim, c_s=s_input_dim, gate_type=gate_type
+            )
+            self.gated_pairwise_feature_injector = GatedPairwiseFeatureInjector(
+                c_pair=configs.c_z, c_z=configs.c_z, gate_type=gate_type
+            )
+
+            # Dedicated PairformerStack for RibonanzaNet2 pairwise features
+            n_pf_blocks = rnet2_configs.get("n_pairformer_blocks", 4)
+            self.ribonanza_pairformer_stack = PairformerStack(
+                n_blocks=n_pf_blocks,
+                n_heads=16,
+                c_z=configs.c_z,
+                c_s=configs.c_s,
+            )
+
+            logger.info(
+                f"RibonanzaNet2 integration enabled: "
+                f"n_layers={n_layers}, ninp={rnet_config.ninp}, "
+                f"pairwise_dim={rnet_config.pairwise_dimension}, "
+                f"gate_type={gate_type}, n_pairformer_blocks={n_pf_blocks}"
+            )
+        # === End RibonanzaNet2 ===
+
         self.distogram_head = DistogramHead(**configs.model.distogram_head)
         self.confidence_head = ConfidenceHead(**configs.model.confidence_head)
 
@@ -166,6 +353,56 @@ class Protenix(nn.Module):
         # Zero init the recycling layer
         nn.init.zeros_(self.linear_no_bias_z_cycle.weight)
         nn.init.zeros_(self.linear_no_bias_s.weight)
+
+    def reinit_rna_projector_from_protein(self, checkpoint_keys=None) -> str:
+        """Conditionally re-initialize the RNA projector after checkpoint loading.
+
+        Smart detection logic:
+        1. If checkpoint already contains RNA projector weights
+           (``linear_no_bias_a_rna``), they were loaded by ``load_state_dict``
+           → do nothing, return "loaded_from_checkpoint".
+        2. If checkpoint does NOT contain RNA projector weights (protein-only
+           checkpoint), apply the configured init strategy:
+           - ``projector_init="protein"``: copy from loaded protein projector
+           - ``projector_init="zero"``: zero-init the projector
+
+        Args:
+            checkpoint_keys: set/list of keys present in the loaded checkpoint.
+                Used to detect whether RNA projector weights were in the
+                checkpoint. If None, falls back to always re-initializing.
+
+        Returns:
+            str: one of "loaded_from_checkpoint", "copied_from_protein",
+                 "zero_initialized", or "skipped".
+        """
+        te = self.template_embedder
+        if not getattr(te, "rna_template_enable", False):
+            return "skipped"
+
+        # Check if the checkpoint already contained RNA projector weights
+        rna_projector_key = "template_embedder.linear_no_bias_a_rna.weight"
+        # Also check with DDP module. prefix
+        rna_projector_key_ddp = "module." + rna_projector_key
+
+        if checkpoint_keys is not None:
+            has_rna_weights = (
+                rna_projector_key in checkpoint_keys
+                or rna_projector_key_ddp in checkpoint_keys
+            )
+            if has_rna_weights:
+                # Checkpoint already had trained RNA projector weights —
+                # load_state_dict already loaded them. Don't overwrite.
+                return "loaded_from_checkpoint"
+
+        # Checkpoint did NOT have RNA projector weights — apply init strategy
+        init_mode = getattr(te, "rna_projector_init", "protein")
+        with torch.no_grad():
+            if init_mode == "zero":
+                nn.init.zeros_(te.linear_no_bias_a_rna.weight)
+                return "zero_initialized"
+            else:
+                te.linear_no_bias_a_rna.weight.copy_(te.linear_no_bias_a.weight)
+                return "copied_from_protein"
 
     def get_pairformer_output(
         self,
@@ -200,6 +437,44 @@ class Protenix(nn.Module):
         )  # [..., N_token, 449]
         z_constraint = None
 
+        # === RibonanzaNet2: extract features and inject into s_inputs (v3) ===
+        _rnet2_pairwise_features = None
+        if self.rnet2_enable:
+            mask = input_feature_dict.get("ribonanza_token_mask")  # [N_token] bool
+            if mask is not None and mask.any():
+                src = input_feature_dict["tokenized_seq"].unsqueeze(dim=0)  # [1, N]
+                # v3: pass RNA mask as src_mask to prevent non-RNA tokens
+                # from participating in attention inside RibonanzaNet
+                src_mask = mask.unsqueeze(dim=0).long().to(src.device)  # [1, N]
+
+                with torch.no_grad():
+                    self.ribonanza_net.eval()
+                    all_seq_feats, all_pair_feats = self.ribonanza_net.get_embeddings(
+                        src, src_mask=src_mask
+                    )
+
+                # Aggregate across 48 layers using learnable weights
+                w = self.layer_weights.softmax(0)  # [48]
+                seq_feats = (all_seq_feats * w[:, None, None, None]).sum(0)  # [1, L, ninp]
+                pair_feats = (all_pair_feats * w[:, None, None, None, None]).sum(0)  # [1, L, L, pair_dim]
+
+                # Project features
+                seq_feats_proj = self.projection_sequence_features(seq_feats).squeeze(dim=0)  # [L, c_s_inputs]
+                pair_feats_proj = self.projection_pairwise_features(pair_feats).squeeze(dim=0)  # [L, L, c_z]
+
+                # v3: output masking as second safety layer
+                # src_mask prevents attention pollution; this prevents residual
+                # feedforward leakage from non-RNA positions
+                mask_f = mask.to(seq_feats_proj.dtype)  # [N]
+                seq_feats_proj = seq_feats_proj * mask_f.unsqueeze(-1)  # [N, C]
+                pair_feats_proj = pair_feats_proj * (
+                    mask_f.unsqueeze(-1) * mask_f.unsqueeze(-2)
+                ).unsqueeze(-1)  # [N, N, C]
+
+                s_inputs = self.gated_sequence_feature_injector(s_inputs, seq_feats_proj)
+                _rnet2_pairwise_features = pair_feats_proj
+        # === End RibonanzaNet2 (v3) ===
+
         if "constraint_feature" in input_feature_dict:
             z_constraint = self.constraint_embedder(
                 input_feature_dict["constraint_feature"]
@@ -226,6 +501,12 @@ class Protenix(nn.Module):
             )
             if z_constraint is not None:
                 z_init = z_init + z_constraint
+
+        # === RibonanzaNet2: inject pairwise features into z_init ===
+        if self.rnet2_enable and _rnet2_pairwise_features is not None:
+            z_init = self.gated_pairwise_feature_injector(z_init, _rnet2_pairwise_features)
+        # === End RibonanzaNet2 pairwise injection ===
+
         # Line 6
         z = torch.zeros_like(z_init)
         s = torch.zeros_like(s_init)
@@ -248,6 +529,8 @@ class Protenix(nn.Module):
                     if self.template_embedder.n_blocks > 0:
                         z += self.template_embedder(
                             input_feature_dict,
+                            s_inputs,
+                            s,
                             z,
                             triangle_multiplicative=self.configs.triangle_multiplicative,
                             triangle_attention=self.configs.triangle_attention,
@@ -268,6 +551,8 @@ class Protenix(nn.Module):
                     if self.template_embedder.n_blocks > 0:
                         z = z + self.template_embedder(
                             input_feature_dict,
+                            s_inputs,
+                            s,
                             z,
                             triangle_multiplicative=self.configs.triangle_multiplicative,
                             triangle_attention=self.configs.triangle_attention,
@@ -302,6 +587,83 @@ class Protenix(nn.Module):
             self.pairformer_stack.train()
 
         return s_inputs, s, z
+
+    # === RNA LM: project RNA LM embeddings (fail-fast if missing, like ESM) ===
+    def _get_s_rnalm(
+        self,
+        input_feature_dict: dict[str, Any],
+        N_token: int,
+        s_trunk: Optional[torch.Tensor] = None,
+    ) -> Optional[torch.Tensor]:
+        """Project RNA LM embeddings to c_s dimension, apply gating.
+        Returns None when injection_mode is 'input' (input-only mode uses InputFeatureEmbedder).
+
+        Raises RuntimeError if rnalm is enabled but embeddings are missing from
+        input_feature_dict — following the same fail-fast pattern as ESM embeddings
+        to prevent silent training with random noise.
+
+        When separate_dna_projection=True:
+            Uses rna_projection for RNA embeddings + dna_projection for DNA embeddings,
+            combines them (they don't overlap by position).
+        When separate_dna_projection=False (legacy):
+            Uses single rnalm_projection on the combined tensor.
+        """
+        if not self.rnalm_enable:
+            return None
+        # Input-only injection is handled in InputFeatureEmbedder; no s_rnalm for diffusion
+        if self.rnalm_injection_mode == "input":
+            return None
+
+        if self.rnalm_separate_dna:
+            # === Separate RNA/DNA projections — only use enabled ones ===
+            # Initialize lm_delta as zeros
+            lm_delta = torch.zeros(
+                [*input_feature_dict["token_index"].shape[:-1], self.configs.c_s],
+                device=input_feature_dict["token_index"].device,
+                dtype=next(self.parameters()).dtype,
+            )
+
+            if self.rnalm_use_rna:
+                if "rna_llm_embedding" not in input_feature_dict:
+                    raise RuntimeError(
+                        "rnalm enabled with use_rna_embed=True but 'rna_llm_embedding' "
+                        "missing from input features."
+                    )
+                lm_delta = lm_delta + self.rna_projection(input_feature_dict["rna_llm_embedding"])
+
+            if self.rnalm_use_dna:
+                if "dna_llm_embedding" not in input_feature_dict:
+                    raise RuntimeError(
+                        "rnalm enabled with use_dna_embed=True but 'dna_llm_embedding' "
+                        "missing from input features."
+                    )
+                lm_delta = lm_delta + self.dna_projection(input_feature_dict["dna_llm_embedding"])
+        else:
+            # === Combined projection (legacy) ===
+            if "rnalm_token_embedding" not in input_feature_dict:
+                raise RuntimeError(
+                    "rnalm.enable=True but 'rnalm_token_embedding' is missing from "
+                    "input features. Ensure the RNA/DNA LLM embedding data pipeline is "
+                    "correctly configured (check embedding_dir / sequence_fpath) and that "
+                    "the bioassembly file is not corrupted. Remove corrupted entries from "
+                    "training indices and regenerate embeddings if needed."
+                )
+            lm_delta = self.rnalm_projection(input_feature_dict["rnalm_token_embedding"])
+
+        # Apply gating if enabled
+        if self.rnalm_gate_mode == "scalar":
+            g1 = torch.sigmoid(self.rnalm_alpha_logit)
+            lm_delta = g1 * lm_delta
+        elif self.rnalm_gate_mode == "token" and s_trunk is not None:
+            g2 = torch.sigmoid(self.rnalm_gate_mlp(s_trunk.detach()))
+            lm_delta = g2 * lm_delta
+        elif self.rnalm_gate_mode == "dual" and s_trunk is not None:
+            g1 = torch.sigmoid(self.rnalm_alpha_logit)
+            g2 = torch.sigmoid(self.rnalm_gate_mlp(s_trunk.detach()))
+            lm_delta = g1 * g2 * lm_delta
+
+        return lm_delta
+    # === End RNA LM ===
 
     def sample_diffusion(self, **kwargs: Any) -> torch.Tensor:
         """
@@ -501,6 +863,11 @@ class Protenix(nn.Module):
             mc_dropout=mc_dropout,
         )
 
+        # === RNA LM: project RNA LM embeddings for inference ===
+        N_token = input_feature_dict["residue_index"].shape[-1]
+        s_rnalm = self._get_s_rnalm(input_feature_dict, N_token, s_trunk=s)
+        # === End RNA LM ===
+
         keys_to_delete = []
         for key in input_feature_dict.keys():
             if "template_" in key or key in [
@@ -552,6 +919,7 @@ class Protenix(nn.Module):
         else:
             cache["pair_z"] = None
             cache["p_lm/c_l"] = [None, None]
+        # === RNA LM: pass s_rnalm to sample_diffusion ===
         pred_dict["coordinate"] = self.sample_diffusion(
             denoise_net=self.diffusion_module,
             input_feature_dict=input_feature_dict,
@@ -565,7 +933,9 @@ class Protenix(nn.Module):
             noise_schedule=noise_schedule,
             inplace_safe=inplace_safe,
             enable_efficient_fusion=self.enable_efficient_fusion,
+            s_rnalm=s_rnalm,
         )
+        # === End RNA LM ===
 
         step_diffusion = time.time()
         time_tracker.update({"diffusion": step_diffusion - step_trunk})
@@ -681,6 +1051,11 @@ class Protenix(nn.Module):
             chunk_size=chunk_size,
         )
 
+        # === RNA LM: project RNA LM embeddings for training ===
+        N_token = input_feature_dict["residue_index"].shape[-1]
+        s_rnalm = self._get_s_rnalm(input_feature_dict, N_token, s_trunk=s)
+        # === End RNA LM ===
+
         log_dict = {}
         pred_dict = {}
 
@@ -718,6 +1093,7 @@ class Protenix(nn.Module):
             ]  # =1
             N_step_mini_rollout = self.configs.sample_diffusion["N_step_mini_rollout"]
             self.diffusion_module.eval()  # use eval mode for mini-rollout
+            # === RNA LM: pass s_rnalm to mini-rollout ===
             coordinate_mini = self.sample_diffusion(
                 denoise_net=self.diffusion_module,
                 input_feature_dict=input_feature_dict,
@@ -742,7 +1118,9 @@ class Protenix(nn.Module):
                     dtype=s_inputs.dtype,
                 ),
                 enable_efficient_fusion=self.enable_efficient_fusion,
+                s_rnalm=s_rnalm.detach() if s_rnalm is not None else None,
             )
+            # === End RNA LM ===
             self.diffusion_module.train()
             coordinate_mini.detach_()
             pred_dict["coordinate_mini"] = coordinate_mini
@@ -796,6 +1174,7 @@ class Protenix(nn.Module):
         drop_conditioning = (
             random.random() < self.configs.model.condition_embedding_drop_rate
         )
+        # === RNA LM: pass s_rnalm to sample_diffusion_training ===
         _, x_denoised, x_noise_level = autocasting_disable_decorator(
             self.configs.skip_amp.sample_diffusion_training
         )(sample_diffusion_training)(
@@ -813,7 +1192,9 @@ class Protenix(nn.Module):
             diffusion_chunk_size=self.configs.diffusion_chunk_size,
             use_conditioning=not drop_conditioning,
             enable_efficient_fusion=self.enable_efficient_fusion,
+            s_rnalm=s_rnalm,
         )
+        # === End RNA LM ===
         pred_dict.update(
             {
                 "distogram": autocasting_disable_decorator(True)(self.distogram_head)(

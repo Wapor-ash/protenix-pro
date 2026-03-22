@@ -2590,9 +2590,10 @@ class AddAtomArrayAnnot(object):
         for start, end in zip(chain_starts[:-1], chain_starts[1:]):
             mol_types = atom_array.mol_type[start:end]
             mol_type_count = Counter(mol_types)
-            sorted_by_key = sorted(mol_type_count.items(), key=lambda x: x[0])
-            sorted_by_value = sorted(sorted_by_key, key=lambda x: x[1])
-            most_freq_mol_type = sorted_by_value[0][0]
+            # Use most_common to get the most frequent type.
+            # Previous code used sorted ascending + index [0], which returned
+            # the LEAST frequent type — the opposite of the intended behavior.
+            most_freq_mol_type = mol_type_count.most_common(1)[0][0]
             chain_mol_type.extend([most_freq_mol_type] * (end - start))
 
         atom_array.set_annotation(
@@ -2867,6 +2868,28 @@ class AddAtomArrayAnnot(object):
         return copy
 
     @staticmethod
+    def _canonical_mol_order(
+        atom_array: AtomArray, raw_indices: np.ndarray
+    ) -> np.ndarray:
+        """
+        Compute canonical atom ordering for a molecule, consistent with
+        the entity_mol_id assignment logic (L2920-2926).
+
+        Steps:
+          1. Sort by array position
+          2. Stable-sort by label_entity_id
+
+        This ensures that two equivalent multi-chain molecule copies always
+        present their atoms in the same entity-id-first order, regardless of
+        where each copy's chains sit in the atom_array.
+        """
+        sorted_idx = np.sort(raw_indices)
+        chain_perm = np.argsort(
+            atom_array.label_entity_id[sorted_idx], kind="stable"
+        )
+        return sorted_idx[chain_perm]
+
+    @staticmethod
     def find_equiv_mol_and_assign_ids(
         atom_array: AtomArray,
         entity_poly_type: Optional[dict[str, str]] = None,
@@ -2970,32 +2993,38 @@ class AddAtomArrayAnnot(object):
 
         atom_array.set_annotation("entity_mol_id", entity_mol_ids)
 
-        # assign mol_atom_index
-        mol_starts = get_starts_by(
-            atom_array, by_annot="mol_id", add_exclusive_stop=True
-        )
-        mol_atom_index = np.zeros_like(atom_array.mol_id, dtype=np.int32)
-        for start, stop in zip(mol_starts[:-1], mol_starts[1:]):
-            mol_atom_index[start:stop] = np.arange(stop - start)
+        # assign mol_atom_index using canonical ordering per molecule
+        # (fixes crash on cross-chain covalent molecules where mol_id
+        #  spans non-contiguous array segments)
+        mol_atom_index = np.zeros(len(atom_array), dtype=np.int32)
+        for raw_indices in mol_indices:
+            canonical_idx = AddAtomArrayAnnot._canonical_mol_order(
+                atom_array, raw_indices
+            )
+            mol_atom_index[canonical_idx] = np.arange(len(canonical_idx))
         atom_array.set_annotation("mol_atom_index", mol_atom_index)
 
-        # check mol equivalence again
+        # check mol equivalence again using true molecules + canonical ordering
         if check_final_equiv:
-            num_mols = len(mol_starts) - 1
+            num_mols = len(mol_indices)
             for i in range(num_mols):
                 for j in range(i + 1, num_mols):
-                    start_i, stop_i = mol_starts[i], mol_starts[i + 1]
-                    start_j, stop_j = mol_starts[j], mol_starts[j + 1]
+                    idx_i = AddAtomArrayAnnot._canonical_mol_order(
+                        atom_array, mol_indices[i]
+                    )
+                    idx_j = AddAtomArrayAnnot._canonical_mol_order(
+                        atom_array, mol_indices[j]
+                    )
                     if (
-                        atom_array.entity_mol_id[start_i]
-                        != atom_array.entity_mol_id[start_j]
+                        atom_array.entity_mol_id[idx_i[0]]
+                        != atom_array.entity_mol_id[idx_j[0]]
                     ):
                         continue
                     for key in ["res_name", "atom_name", "mol_atom_index"]:
                         # not check res_id for ligand may have different res_id
                         annot = getattr(atom_array, key)
                         assert np.all(
-                            annot[start_i:stop_i] == annot[start_j:stop_j]
+                            annot[idx_i] == annot[idx_j]
                         ), f"not equal {key} when find_equiv_mol_and_assign_ids()"
 
         return atom_array

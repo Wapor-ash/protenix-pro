@@ -31,6 +31,7 @@ from protenix.model.utils import expand_at_dim, get_checkpoint_fn, permute_final
 class DiffusionConditioning(nn.Module):
     """
     Implements Algorithm 21 in AF3
+    Extended with RNA LM (RiNALMo) embedding injection for RNA structure prediction.
 
     Args:
         sigma_data (float, optional): the standard deviation of the data. Defaults to 16.0.
@@ -38,6 +39,7 @@ class DiffusionConditioning(nn.Module):
         c_s (int, optional):  hidden dim [for single embedding]. Defaults to 384.
         c_s_inputs (int, optional): input embedding dim from InputEmbedder. Defaults to 449.
         c_noise_embedding (int, optional): noise embedding dim. Defaults to 256.
+        rnalm_configs (dict, optional): RNA LM embedding config. Defaults to None.
     """
 
     def __init__(
@@ -47,6 +49,7 @@ class DiffusionConditioning(nn.Module):
         c_s: int = 384,
         c_s_inputs: int = 449,
         c_noise_embedding: int = 256,
+        rnalm_configs: Optional[dict] = None,
     ) -> None:
         super(DiffusionConditioning, self).__init__()
         self.sigma_data = sigma_data
@@ -63,13 +66,27 @@ class DiffusionConditioning(nn.Module):
         self.transition_z1 = Transition(c_in=self.c_z, n=2)
         self.transition_z2 = Transition(c_in=self.c_z, n=2)
 
-        # Line6-Line7
+        # Line6-Line7 (original: concat [s_trunk, s_inputs])
         self.layernorm_s = LayerNorm(self.c_s + self.c_s_inputs, create_offset=False)
         self.linear_no_bias_s = LinearNoBias(
             in_features=self.c_s + self.c_s_inputs,
             out_features=self.c_s,
             precision=torch.float32,
         )
+
+        # === RNA LM (RiNALMo) Embedding Integration ===
+        # fusion_method == "add": s_i = concat([s_trunk + s_rnalm, s_inputs])
+        # Same dims as original, reuses existing layers (fewest new params).
+        self.rnalm_configs = rnalm_configs or {}
+        self.rnalm_enable = self.rnalm_configs.get("enable", False)
+        # If both use_rna and use_dna are False, disable to stay consistent with data layer.
+        if self.rnalm_enable:
+            _use_rna = self.rnalm_configs.get("use_rna_embed", True)
+            _use_dna = self.rnalm_configs.get("use_dna_embed", True)
+            if not _use_rna and not _use_dna:
+                self.rnalm_enable = False
+        # === End RNA LM Integration ===
+
         # Line8-Line9
         self.fourier_embedding = FourierEmbedding(c=c_noise_embedding)
         self.layernorm_n = LayerNorm(c_noise_embedding, create_offset=False)
@@ -116,6 +133,7 @@ class DiffusionConditioning(nn.Module):
         pair_z: torch.Tensor,
         inplace_safe: bool = False,
         use_conditioning: bool = True,
+        s_rnalm: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -134,6 +152,8 @@ class DiffusionConditioning(nn.Module):
                 [..., N_tokens, N_tokens, c_z]
             inplace_safe (bool): Whether it is safe to use inplace operations.
             use_conditioning (bool): Whether to drop the s/z embeddings.
+            s_rnalm (Optional[torch.Tensor]): projected RNA LM embedding
+                [..., N_tokens, c_s]. Defaults to None.
         Returns:
             tuple[torch.Tensor, torch.Tensor]: embeddings s and z
                 - s (torch.Tensor): [..., N_sample, N_tokens, c_s]
@@ -147,17 +167,30 @@ class DiffusionConditioning(nn.Module):
                 else:
                     s_trunk = 0 * s_trunk
                     z_trunk = 0 * z_trunk
+                # === RNA LM: also zero out s_rnalm when dropping conditioning ===
+                if s_rnalm is not None:
+                    s_rnalm = 0 * s_rnalm
+                # === End RNA LM ===
             pair_z = self.prepare_cache(relp_feature, z_trunk, inplace_safe)
         else:
             # Pair conditioning
             if inplace_safe:
                 pair_z_clone = pair_z.clone()
                 pair_z = pair_z_clone
-        # Single conditioning
-        single_s = torch.cat(
-            tensors=[s_trunk, s_inputs], dim=-1
-        )  # [..., N_tokens, c_s + c_s_inputs]
+
+        # === RNA LM: Single conditioning with optional RNA LM embedding injection ===
+        # Add s_rnalm to s_trunk before concat (fewest new parameters)
+        if s_rnalm is not None and self.rnalm_enable:
+            single_s = torch.cat(
+                tensors=[s_trunk + s_rnalm, s_inputs], dim=-1
+            )  # [..., N_tokens, c_s + c_s_inputs]
+        else:
+            single_s = torch.cat(
+                tensors=[s_trunk, s_inputs], dim=-1
+            )  # [..., N_tokens, c_s + c_s_inputs]
         single_s = self.linear_no_bias_s(self.layernorm_s(single_s))
+        # === End RNA LM ===
+
         noise_n = self.fourier_embedding(
             t_hat_noise_level=torch.log(input=t_hat_noise_level / self.sigma_data) / 4
         ).to(
@@ -270,6 +303,7 @@ class DiffusionModule(nn.Module):
         drop_path_rate: float = 0.0,
         blocks_per_ckpt: Optional[int] = None,
         use_fine_grained_checkpoint: bool = False,
+        rnalm_configs: Optional[dict] = None,
     ) -> None:
         super(DiffusionModule, self).__init__()
         self.sigma_data = sigma_data
@@ -284,9 +318,12 @@ class DiffusionModule(nn.Module):
         self.blocks_per_ckpt = blocks_per_ckpt
         self.use_fine_grained_checkpoint = use_fine_grained_checkpoint
 
+        # === RNA LM: pass rnalm_configs to DiffusionConditioning ===
         self.diffusion_conditioning = DiffusionConditioning(
-            sigma_data=self.sigma_data, c_z=c_z, c_s=c_s, c_s_inputs=c_s_inputs
+            sigma_data=self.sigma_data, c_z=c_z, c_s=c_s, c_s_inputs=c_s_inputs,
+            rnalm_configs=rnalm_configs,
         )
+        # === End RNA LM ===
         self.atom_attention_encoder = AtomAttentionEncoder(
             **atom_encoder,
             c_atom=c_atom,
@@ -337,6 +374,7 @@ class DiffusionModule(nn.Module):
         chunk_size: Optional[int] = None,
         use_conditioning: bool = True,
         enable_efficient_fusion: bool = False,
+        s_rnalm: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """The raw network to be trained.
         As in EDM equation (7), this is F_theta(c_in * x, c_noise(sigma)).
@@ -378,6 +416,7 @@ class DiffusionModule(nn.Module):
         # Conditioning, shared across difference samples
         # Diffusion_conditioning consumes 7-8G when token num is 768,
         # use checkpoint here if blocks_per_ckpt is not None.
+        # === RNA LM: pass s_rnalm to diffusion_conditioning ===
         if blocks_per_ckpt:
             checkpoint_fn = get_checkpoint_fn()
             s_single, z_pair = checkpoint_fn(
@@ -390,6 +429,7 @@ class DiffusionModule(nn.Module):
                 pair_z,
                 inplace_safe,
                 use_conditioning,
+                s_rnalm,
             )
         else:
             s_single, z_pair = self.diffusion_conditioning(
@@ -401,7 +441,9 @@ class DiffusionModule(nn.Module):
                 pair_z=pair_z,
                 inplace_safe=inplace_safe,
                 use_conditioning=use_conditioning,
+                s_rnalm=s_rnalm,
             )  # [..., N_sample, N_token, c_s], [..., N_token, N_token, c_z]
+        # === End RNA LM ===
 
         # Expand embeddings to match N_sample
         s_trunk = expand_at_dim(s_trunk, dim=-3, n=1)  # [..., N_sample, N_token, c_s]
@@ -520,6 +562,7 @@ class DiffusionModule(nn.Module):
         chunk_size: Optional[int] = None,
         use_conditioning: bool = True,
         enable_efficient_fusion: bool = False,
+        s_rnalm: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """One step denoise: x_noisy, noise_level -> x_denoised
 
@@ -562,6 +605,7 @@ class DiffusionModule(nn.Module):
         # Compute the update given r_noisy (the scaled x_noisy)
         # As in EDM:
         #     r_update = F(r_noisy, c_noise(sigma))
+        # === RNA LM: pass s_rnalm to f_forward ===
         r_update = self.f_forward(
             r_noisy=r_noisy,
             t_hat_noise_level=t_hat_noise_level,
@@ -576,7 +620,9 @@ class DiffusionModule(nn.Module):
             chunk_size=chunk_size,
             use_conditioning=use_conditioning,
             enable_efficient_fusion=enable_efficient_fusion,
+            s_rnalm=s_rnalm,
         )
+        # === End RNA LM ===
 
         # Rescale updates to positions and combine with input positions
         # As in EDM:

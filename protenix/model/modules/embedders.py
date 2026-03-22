@@ -34,6 +34,7 @@ class InputFeatureEmbedder(nn.Module):
         c_atompair (int, optional): atom pair embedding dim. Defaults to 16.
         c_token (int, optional): token embedding dim. Defaults to 384.
         esm_configs (dict[str, Any], optional): esm config. Defaults to {}.
+        rnalm_configs (dict[str, Any], optional): RNA LLM config for input injection. Defaults to {}.
     """
 
     def __init__(
@@ -42,6 +43,7 @@ class InputFeatureEmbedder(nn.Module):
         c_atompair: int = 16,
         c_token: int = 384,
         esm_configs: dict[str, Any] = {},
+        rnalm_configs: dict[str, Any] = {},
     ) -> None:
         super(InputFeatureEmbedder, self).__init__()
         self.c_atom = c_atom
@@ -64,6 +66,55 @@ class InputFeatureEmbedder(nn.Module):
                 self.c_token + 32 + 32 + 1,
             )
             nn.init.zeros_(self.linear_esm.weight)
+
+        # === RNA LLM Input Injection (like ESM, zero-init) ===
+        # When injection_mode is "input" or "both", project RNA LLM embeddings
+        # to c_s_inputs dimension and add to s_inputs, mimicking ESM injection.
+        self.rnalm_input_enable = False
+        self.rnalm_input_separate_dna = False
+        self.rnalm_input_use_rna = True
+        self.rnalm_input_use_dna = True
+        rnalm_enable = rnalm_configs.get("enable", False)
+        injection_mode = rnalm_configs.get("injection_mode", "diffusion")
+        separate_dna = rnalm_configs.get("separate_dna_projection", False)
+        _use_rna = rnalm_configs.get("use_rna_embed", True)
+        _use_dna = rnalm_configs.get("use_dna_embed", True)
+        # If both use_rna and use_dna are False, disable rnalm input injection
+        # to stay consistent with data layer (which won't produce any embeddings).
+        if not _use_rna and not _use_dna:
+            rnalm_enable = False
+        if rnalm_enable and injection_mode in ("input", "both"):
+            self.rnalm_input_enable = True
+            self.rnalm_input_separate_dna = separate_dna
+            self.rnalm_input_use_rna = rnalm_configs.get("use_rna_embed", True)
+            self.rnalm_input_use_dna = rnalm_configs.get("use_dna_embed", True)
+            c_s_inputs = self.c_token + 32 + 32 + 1  # 449
+
+            if separate_dna:
+                # === Separate RNA/DNA input projections — only create needed ones ===
+                rnalm_embedding_dim = rnalm_configs.get("embedding_dim", 1280)
+                dna_embedding_dim = rnalm_configs.get("dna_embedding_dim", 1024)
+                if self.rnalm_input_use_rna:
+                    self.linear_rna_llm = LinearNoBias(rnalm_embedding_dim, c_s_inputs)
+                    nn.init.zeros_(self.linear_rna_llm.weight)
+                if self.rnalm_input_use_dna:
+                    self.linear_dna_llm = LinearNoBias(dna_embedding_dim, c_s_inputs)
+                    nn.init.zeros_(self.linear_dna_llm.weight)
+                logger.info(
+                    f"Separate RNA/DNA input injection (like ESM): "
+                    f"use_rna={self.rnalm_input_use_rna} ({rnalm_embedding_dim}->{c_s_inputs}), "
+                    f"use_dna={self.rnalm_input_use_dna} ({dna_embedding_dim}->{c_s_inputs}), zero-init"
+                )
+            else:
+                # === Combined input projection (legacy) ===
+                rnalm_embedding_dim = rnalm_configs.get("embedding_dim", 1280)
+                self.linear_rnalm = LinearNoBias(rnalm_embedding_dim, c_s_inputs)
+                nn.init.zeros_(self.linear_rnalm.weight)
+                logger.info(
+                    f"RNA LLM input injection enabled (like ESM): "
+                    f"{rnalm_embedding_dim} -> {c_s_inputs}, zero-init"
+                )
+        # === End RNA LLM Input Injection ===
 
         # Line2
         self.input_feature = {"restype": 32, "profile": 32, "deletion_mean": 1}
@@ -117,6 +168,42 @@ class InputFeatureEmbedder(nn.Module):
             # Add esm embedding to s_inputs if enable.
             esm_embeddings = self.linear_esm(input_feature_dict["esm_token_embedding"])
             s_inputs = s_inputs + esm_embeddings
+
+        # === RNA LLM Input Injection (like ESM — fail-fast if missing) ===
+        if self.rnalm_input_enable:
+            if self.rnalm_input_separate_dna:
+                # Separate RNA/DNA input projections — only inject enabled ones
+                if self.rnalm_input_use_rna:
+                    if "rna_llm_embedding" not in input_feature_dict:
+                        raise RuntimeError(
+                            "rnalm input injection enabled with use_rna_embed=True, "
+                            "but 'rna_llm_embedding' is missing from input features."
+                        )
+                    s_inputs = s_inputs + self.linear_rna_llm(
+                        input_feature_dict["rna_llm_embedding"]
+                    )
+                if self.rnalm_input_use_dna:
+                    if "dna_llm_embedding" not in input_feature_dict:
+                        raise RuntimeError(
+                            "rnalm input injection enabled with use_dna_embed=True, "
+                            "but 'dna_llm_embedding' is missing from input features."
+                        )
+                    s_inputs = s_inputs + self.linear_dna_llm(
+                        input_feature_dict["dna_llm_embedding"]
+                    )
+            else:
+                # Combined projection (legacy) — require key
+                if "rnalm_token_embedding" not in input_feature_dict:
+                    raise RuntimeError(
+                        "rnalm input injection enabled but 'rnalm_token_embedding' is "
+                        "missing from input features. Check embedding_dir / sequence_fpath "
+                        "config and ensure the bioassembly file is not corrupted."
+                    )
+                rnalm_embeddings = self.linear_rnalm(
+                    input_feature_dict["rnalm_token_embedding"]
+                )
+                s_inputs = s_inputs + rnalm_embeddings
+        # === End RNA LLM Input Injection ===
 
         return s_inputs
 

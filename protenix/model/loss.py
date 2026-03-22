@@ -1206,7 +1206,28 @@ class MSELoss(nn.Module):
 
         loss = loss_reduction(weighted_align_mse_loss, method=self.reduction)
 
-        return loss
+        metrics = {}
+        # RNA-only MSE for monitoring (does NOT affect backprop)
+        with torch.no_grad():
+            rna_coord_mask = (is_rna * coordinate_mask).to(per_atom_se.dtype)
+            n_rna_atoms = rna_coord_mask.sum(dim=-1)
+            valid_rna_mask = n_rna_atoms > 0
+            if valid_rna_mask.any():
+                rna_coord_mask = rna_coord_mask.unsqueeze(-2)
+                # per_atom_se: [..., N_sample, N_atom], rna_coord_mask broadcasts
+                rna_se_per_sample = (per_atom_se * rna_coord_mask).sum(dim=-1) / (
+                    n_rna_atoms.unsqueeze(-1) + self.eps
+                    if n_rna_atoms.dim() > 0
+                    else n_rna_atoms + self.eps
+                )  # [..., N_sample]
+                rna_mse = rna_se_per_sample.mean(dim=-1)
+                if valid_rna_mask.dim() > 0:
+                    rna_mse = rna_mse[valid_rna_mask]
+                metrics["rna_mse_loss"] = loss_reduction(
+                    rna_mse, method=self.reduction
+                )
+
+        return (loss, metrics)
 
 
 def calculate_atom_bespoke_lddt(
@@ -1483,6 +1504,12 @@ class ProtenixLoss(nn.Module):
         self.bond_loss = BondLoss(**configs.loss.diffusion.bond)
         self.smooth_lddt_loss = SmoothLDDTLoss(**configs.loss.diffusion.smooth_lddt)
         self.distogram_loss = DistogramLoss(**configs.loss.distogram)
+
+        # Apply RNA-specific loss overrides if enabled
+        rna_loss_cfg = getattr(configs, "rna_loss", None)
+        if rna_loss_cfg is not None and getattr(rna_loss_cfg, "enable", False):
+            from protenix.model.rna_loss import apply_rna_loss_overrides
+            apply_rna_loss_overrides(self, rna_loss_cfg)
 
     def calculate_label(
         self,

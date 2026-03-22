@@ -1,0 +1,216 @@
+Loading RNA embedding manifest...
+  RNA manifest has 4842 unique sequences
+Loading DNA embedding manifest...
+  DNA manifest has 755 unique sequences
+
+Found 6479 bioassembly files to check
+
+  Processed 1000/6479 files...
+  Processed 2000/6479 files...
+  Processed 3000/6479 files...
+  Processed 4000/6479 files...
+  Processed 5000/6479 files...
+  Processed 6000/6479 files...
+  Processed all 6479 files.
+  (2 files had load errors)
+================================================================================
+SUMMARY
+================================================================================
+
+Entity poly_type distribution:
+  polypeptide(L): 90763
+  polyribonucleotide: 12568
+  polydeoxyribonucleotide: 1267
+  polydeoxyribonucleotide/polyribonucleotide hybrid: 157
+  polypeptide(D): 14
+  other: 3
+  peptide nucleic acid: 1
+
+Total RNA entities: 12568
+Total DNA entities: 1267
+Total hybrid entities: 157
+Total protein entities: 90777
+Total other entities: 4
+
+================================================================================
+MISSING RNA EMBEDDINGS: 0 entities
+================================================================================
+  (none)
+
+================================================================================
+MISSING DNA EMBEDDINGS: 0 entities
+================================================================================
+  (none)
+
+================================================================================
+HYBRID ENTITIES MISSING FROM RNA MANIFEST: 0 entities
+================================================================================
+  (none)
+
+================================================================================
+HYBRID ENTITIES MISSING FROM DNA MANIFEST: 156 entities
+================================================================================
+  PDB=100d  entity=1  seq=CCGGCGCCGG (len=10)
+  PDB=104d  entity=1  seq=CGCGTATACGCG (len=12)
+  PDB=161d  entity=1  seq=CCGGCGCCGG (len=10)
+  PDB=168d  entity=1  seq=GCGTATACGC (len=10)
+  PDB=169d  entity=2  seq=GCGTATACCC (len=10)
+  PDB=170d  entity=1  seq=CGCGAATTCGCG (len=12)
+  PDB=1byx  entity=2  seq=GCCACTGC (len=8)
+  PDB=1d87  entity=1  seq=GCGTATACGC (len=10)
+  PDB=1d88  entity=1  seq=GCGTATACGC (len=10)
+  PDB=1d96  entity=1  seq=GCGTATACGC (len=10)
+  PDB=1d9d  entity=1  seq=TCGAUC (len=6)
+  PDB=1d9f  entity=1  seq=TTUT (len=4)
+  PDB=1d9h  entity=1  seq=GCGTAUACGC (len=10)
+  PDB=1dhh  entity=1  seq=GGAGAUGAC (len=9)
+  PDB=1dno  entity=1  seq=GCGTATACGC (len=10)
+  PDB=1dnt  entity=1  seq=GCGTATACGC (len=10)
+  PDB=1dnx  entity=1  seq=GCGTATACGC (len=10)
+  PDB=1drn  entity=1  seq=GGAGAUGAC (len=9)
+  PDB=1dxn  entity=1  seq=CGCAAATTTGCG (len=12)
+  PDB=1evp  entity=1  seq=CCACTAGTGG (len=10)
+  PDB=1fc8  entity=1  seq=GGACTTCGGTCC (len=12)
+  PDB=1ffz  entity=2  seq=CCAA (len=4)
+  PDB=1gtc  entity=2  seq=GCCACTGC (len=8)
+  PDB=1gv6  entity=1  seq=CTGCTTCTGC (len=10)
+  PDB=1hhw  entity=1  seq=CTGAUATGC (len=9)
+  PDB=1hhx  entity=1  seq=CUGAUAUGC (len=9)
+  PDB=1ho6  entity=1  seq=GGACTTCGGUCC (len=12)
+  PDB=1hoq  entity=1  seq=GGACTTCGGTCC (len=12)
+  PDB=1i2x  entity=1  seq=GCGATATACGU (len=11)
+  PDB=1i2y  entity=1  seq=GCGATATACGU (len=11)
+  PDB=1icg  entity=1  seq=GCUUCGGCN (len=9)
+  PDB=1id9  entity=1  seq=GCUUCGGCN (len=9)
+  PDB=1idw  entity=1  seq=GCUUCGGCU (len=9)
+  PDB=1iha  entity=1  seq=GCUUCGGCU (len=9)
+  PDB=1jo2  entity=1  seq=CGATCG (len=6)
+  PDB=1l3m  entity=1  seq=CGCAAATTTGCG (len=12)
+  PDB=1me0  entity=1  seq=GGACUUCGGTCC (len=12)
+  PDB=1n7a  entity=1  seq=UGAGGU (len=6)
+  PDB=1n7b  entity=1  seq=UGAGGU (len=6)
+  PDB=1nao  entity=2  seq=GUCATCTCC (len=9)
+  PDB=1nh3  entity=3  seq=AAAAATUUUUCCAAGUCUUUUT (len=22)
+  PDB=1ofx  entity=2  seq=GCGTATACCC (len=10)
+  PDB=1oka  entity=2  seq=CCCAAATGA (len=9)
+  PDB=1q7y  entity=3  seq=CCA (len=3)
+  PDB=1si2  entity=1  seq=CGUGACUCT (len=9)
+  PDB=1yrm  entity=1  seq=GCAGACUUAAAUCUGC (len=16)
+  PDB=216d  entity=1  seq=ICICICIC (len=8)
+  PDB=217d  entity=1  seq=ICICICIC (len=8)
+  PDB=222d  entity=1  seq=GCGTATACGC (len=10)
+  PDB=246d  entity=1  seq=GUAUAUAC (len=8)
+  PDB=247d  entity=1  seq=GCGATATACGC (len=11)
+  PDB=248d  entity=1  seq=GCGATATACGC (len=11)
+  PDB=2h0s  entity=1  seq=AAGCGCCUGGACUUAAAGCCAUUGCACU (len=28)
+  PDB=2h0z  entity=1  seq=AGCGCCUGGACUUAAAGCCAUUGCACU (len=27)
+  PDB=2hvr  entity=2  seq=CAATTGCGACCN (len=12)
+  PDB=2hvr  entity=3  seq=ACACTATCGGAAT (len=13)
+  PDB=2l7d  entity=1  seq=CGCGAATTCGCG (len=12)
+  PDB=2m84  entity=1  seq=XXXXXXTTCGCG (len=12)
+  PDB=2m8a  entity=1  seq=XXXXXXTUCXCX (len=12)
+  PDB=2p7d  entity=2  seq=CGGUGAGAAGGGX (len=13)
+  PDB=2p7e  entity=2  seq=CGGUGAGAAGGGX (len=13)
+  PDB=2q2t  entity=2  seq=ATTGCGACCC (len=10)
+  PDB=2q2u  entity=2  seq=ATTGCGACCCCACTATCGGAA (len=21)
+  PDB=2z74  entity=1  seq=AGCGCCUGGACUUAAAGCCAUUGCACU (len=27)
+  PDB=2z75  entity=1  seq=AGCGCCUGGACUUAAAGCCAUUGCACU (len=27)
+  PDB=315d  entity=1  seq=GUAUGUAC (len=8)
+  PDB=332d  entity=1  seq=GUGUGUAC (len=8)
+  PDB=393d  entity=1  seq=CCGGCGCCGG (len=10)
+  PDB=394d  entity=1  seq=CCGGCGCCGG (len=10)
+  PDB=398d  entity=2  seq=GCCACTGC (len=8)
+  PDB=3bo4  entity=2  seq=AAGCCACACAAACCAG (len=16)
+  PDB=3bo4  entity=3  seq=CATACGGCC (len=9)
+  PDB=3c3z  entity=1  seq=CUUGCUGAAGUGCACACAGCAAG (len=23)
+  PDB=3c5d  entity=1  seq=CUUGCUGAAGUGCACACAGCAAG (len=23)
+  PDB=3c7r  entity=1  seq=CUUGCUGAAGUGCACACAGCAAG (len=23)
+  PDB=3cqs  entity=2  seq=CGGUGAGAAGGGXGGCAGAGAAACACACGA (len=30)
+  PDB=3cr1  entity=2  seq=CGGUGAGAAGGGXGGCAGAGAAACACACGA (len=30)
+  PDB=3er8  entity=3  seq=CCUUC (len=5)
+  PDB=3er8  entity=4  seq=UUC (len=3)
+  PDB=3er8  entity=5  seq=CUU (len=3)
+  PDB=3gtk  entity=11  seq=AUCGAGAGGAUGCAGACG (len=18)
+  PDB=3i2q  entity=2  seq=CGGUGAGXAGGGXGGCAGAGAAACACACGA (len=30)
+  PDB=3i2r  entity=2  seq=CGGUGAGXAGGGXGGCAGAGAAACACACGA (len=30)
+  PDB=3i2s  entity=2  seq=CGGUGAGAXGGGXGGCAGAGAAACACACGA (len=30)
+  PDB=3i2u  entity=2  seq=CGGUGAGAXGGGXGGCAGAGAAACACACGA (len=30)
+  PDB=3i55  entity=32  seq=CCAXXACC (len=8)
+  PDB=3iin  entity=3  seq=AAGCCACACAGACCAGACGGCC (len=22)
+  PDB=3iin  entity=4  seq=CAT (len=3)
+  PDB=3kjo  entity=2  seq=TUAGGGTTAG (len=10)
+  PDB=3kyl  entity=2  seq=CUGACCUGACTTCGGTCAGGTCAG (len=24)
+  PDB=3nkb  entity=1  seq=XGGCUUGCA (len=9)
+  PDB=3o3f  entity=3  seq=GACACCTGATTC (len=12)
+  PDB=3o3g  entity=3  seq=GACACCTGATTC (len=12)
+  PDB=3o3h  entity=3  seq=GACACCTGATTC (len=12)
+  PDB=3ola  entity=3  seq=GCCCGGACGAGAGAC (len=15)
+  PDB=3ot0  entity=1  seq=GXGTAUACGC (len=10)
+  PDB=3qrq  entity=2  seq=GUCCCCACGCGUGUGGGGA (len=19)
+  PDB=3uq0  entity=3  seq=CAGTACA (len=7)
+  PDB=3uq2  entity=3  seq=CAGTACA (len=7)
+  PDB=418d  entity=1  seq=GUGCACAC (len=8)
+  PDB=419d  entity=1  seq=GUAUACAC (len=8)
+  PDB=485d  entity=1  seq=CGUGAUCGC (len=9)
+  PDB=4db4  entity=2  seq=GGGCGGGCCCGCCC (len=14)
+  PDB=4dqs  entity=2  seq=GCGATCACGTAC (len=12)
+  PDB=4e7a  entity=1  seq=CAUGGCC (len=7)
+  PDB=4fo6  entity=3  seq=CAGTAC (len=6)
+  PDB=4fyd  entity=3  seq=CGGCGGGCAGGG (len=12)
+  PDB=4hht  entity=3  seq=GACACCTGATTC (len=12)
+  PDB=4k4v  entity=3  seq=UGUUCGACGAGAGAGAC (len=17)
+  PDB=4k4y  entity=3  seq=UGUUCGACGAGAGAC (len=15)
+  PDB=4khs  entity=3  seq=ACAGGTAAGCAGTCCGCG (len=18)
+  PDB=4khu  entity=2  seq=ACAGGTAAGCAGTCCGCG (len=18)
+  PDB=4khw  entity=2  seq=ACAGGTAAGCAGTCCGCG (len=18)
+  PDB=4khy  entity=2  seq=ACAGGUAAGCAGTCCGCG (len=18)
+  PDB=4ki4  entity=2  seq=ACAGGTAAGCAGTCCGCG (len=18)
+  PDB=4ki6  entity=2  seq=ACAGGTAAGCAGTCCGCG (len=18)
+  PDB=4l0a  entity=1  seq=UGGGU (len=5)
+  PDB=4ndf  entity=2  seq=GTTATGATTC (len=10)
+  PDB=4ndg  entity=2  seq=GTTATGATTC (len=10)
+  PDB=4ndi  entity=2  seq=GTTATGATTC (len=10)
+  PDB=4puq  entity=2  seq=CCGAATTCG (len=9)
+  PDB=4qcl  entity=2  seq=GCCUGGAGCGC (len=11)
+  PDB=4z7k  entity=2  seq=GAAUAACUUGCAAAAUAACAAGCAUUGAAAC (len=31)
+  PDB=5b2p  entity=2  seq=GGGAAAUUAGGUGCGCUGGGGGUUUCAGUUGCGCCGAAAGGCGCUCUGUAAUCAUUAAAAAGUAUUUUGAACGGACCUCU... (len=94)
+  PDB=5dek  entity=1  seq=CGAATUCG (len=8)
+  PDB=5dh6  entity=2  seq=GGGCGUCUGGGCAGUACCCA (len=20)
+  PDB=5dh8  entity=2  seq=GGGCGUCUGGGCAGUACCCA (len=20)
+  PDB=5di2  entity=2  seq=GGGCGUCUGGGCAGUACCCA (len=20)
+  PDB=5di4  entity=2  seq=GGGCGUCUGGGCAGUACCCA (len=20)
+  PDB=5dqk  entity=2  seq=GGGCGUCUGGGCAGUACCCA (len=20)
+  PDB=5ev4  entity=2  seq=UUUUUUUUC (len=9)
+  PDB=5it7  entity=1  seq=UUGACCUCAAAUCAGGUAGGAAUACCCGCUGAACUUAAGCAUAUCAAUAAGCGGAGGAAAAGAAACCAACCGGGAUUGCC... (len=3270)
+  PDB=5it7  entity=82  seq=AAAAAUGUGAUCUUGCUUGUAAAUACAAUUUUGAGAGGUUAAUAAAUUACAAGUAGUGCUAUUUUUGUAUUUAGGUUAGC... (len=190)
+  PDB=5k7c  entity=1  seq=CGUGGUUAGGGCCACGUUAAAUAGUUGCUUAAGCCCUAAGCGUUGAU (len=47)
+  PDB=5k7c  entity=2  seq=AUCAGGUGCAA (len=11)
+  PDB=5k7d  entity=1  seq=CGUGGUUAGGGCCACGUUAAAUAGUUGCUUAAGCCCUAAGCGUUGAU (len=47)
+  PDB=5k7d  entity=2  seq=AUCAGGUGCAA (len=11)
+  PDB=5k7e  entity=1  seq=CGUGGUUAGGGCCACGUUAAAUAGUUGCUUAAGCCCUAAGCGUUGAU (len=47)
+  PDB=5k7e  entity=2  seq=AUCAGGUGCAA (len=11)
+  PDB=5nfv  entity=2  seq=AAUAAUUUCUACUGUUGUAGAUAGAUUAAAAGGUAAUUCUAUCUUG (len=46)
+  PDB=5t5a  entity=1  seq=GCAGGGCAAGGCCCAGUCCCGUGCAAGCCGGGACCGCCCCGGGGCGCGGCGCUCAUUCCUGC (len=62)
+  PDB=5y85  entity=2  seq=GCCGCCGCUGGUGCAAGUCCAGCCACGCUUCGGCGUGGGCGCUCAUGGGU (len=50)
+  PDB=5y87  entity=2  seq=GCCGCCGCUGGUGCAAGUCCAGCCACGCUUCGGCGUGGGCGCUCAUGGGU (len=50)
+  PDB=6ibq  entity=1  seq=CGUGAUCGC (len=9)
+  PDB=6mec  entity=1  seq=UUGCGACGCGAAAGCUAGCCAGAUGAUUGUCCCACUAGCCCAACAAGCUAGAACGGGACCGGUUGUUCCCCCAACCGUAG... (len=867)
+  PDB=6uvn  entity=5  seq=CUAAGAAAUUCACGGCGGGCUUGAUGUCCGCGUCUACCUGGUUCACUGCCGUGUAGGCAGC (len=61)
+  PDB=7kjv  entity=4  seq=GCCCGGGAAACCAGGGUUCAAGUCCCUGUUCGGGCGCCA (len=39)
+  PDB=7kjw  entity=4  seq=GCCCGGGAAACCAGGGUUCAAGUCCCUGUUCGGGCGCCA (len=39)
+  PDB=7kjx  entity=4  seq=UCAAGUCCCUGUUCGGGCGCCA (len=22)
+  PDB=7r6l  entity=2  seq=AGUAUAUUGAUUAGUUUUGGAGUACUCGACCCGGCCA (len=37)
+  PDB=8k87  entity=2  seq=AUAAUGGUUUCUUAGACGUCG (len=21)
+  PDB=8tju  entity=1  seq=GGCAAGGUACGGCAUAUGGAUGCAGUUCACAGACUAAAUGUCGGUCGGGGAAGAUGUAUUCUUCUCAUAAGAUAUAGUCG... (len=416)
+  PDB=9oky  entity=1  seq=AGAGAAGAUCUUCUCU (len=16)
+  PDB=9okz  entity=1  seq=AGAGAAGAUCUUCUCU (len=16)
+  PDB=9u6z  entity=1  seq=GGAUGCUUUCGAGCCAUCC (len=19)
+  PDB=9u70  entity=1  seq=GGAUGCUUUCGAGCGAUCC (len=19)
+
+================================================================================
+FINAL COUNTS
+================================================================================
+Missing RNA embeddings: 0 / 12568 RNA entities
+Missing DNA embeddings: 0 / 1267 DNA entities
+Hybrid missing from RNA manifest: 0 / 157
+Hybrid missing from DNA manifest: 156 / 157

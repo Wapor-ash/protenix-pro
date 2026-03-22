@@ -551,6 +551,10 @@ class MultiChainPermutation(object):
         """
         Select atoms from the input dictionary based on the specified mol_atom_index.
 
+        Uses index mapping to handle non-monotonic mol_atom_index that can
+        arise when a multi-chain covalent molecule's chains appear in different
+        physical order across equivalent copies (canonical mol_atom_index fix).
+
         Args:
             input_dict (dict): Input dict.
             mol_atom_index (torch.Tensor): A tensor of atom indices.
@@ -558,8 +562,18 @@ class MultiChainPermutation(object):
         Returns:
             dict: A dictionary containing the selected atom features.
         """
-        mask = torch.isin(input_dict["mol_atom_index"], mol_atom_index)
-        out_dict = {k: v[mask] for k, v in input_dict.items()}
+        input_mai = input_dict["mol_atom_index"]
+        # Build reverse map: mol_atom_index value -> position in input
+        max_idx = max(int(input_mai.max().item()), int(mol_atom_index.max().item())) + 1
+        idx_map = input_mai.new_full((max_idx,), -1, dtype=torch.long)
+        idx_map[input_mai] = torch.arange(
+            len(input_mai), device=input_mai.device, dtype=torch.long
+        )
+        positions = idx_map[mol_atom_index]
+        assert (positions >= 0).all(), (
+            "Some mol_atom_index values not found in input"
+        )
+        out_dict = {k: v[positions] for k, v in input_dict.items()}
         assert (out_dict["mol_atom_index"] == mol_atom_index).all()
         return out_dict
 

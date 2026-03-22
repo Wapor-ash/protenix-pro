@@ -1,0 +1,44 @@
+核心任务 整合 RNAPro 的功能进 /inspire/ssd/project/sais-bio/public/ash_proj/code/protenix_pro
+System/Team Setup Context:
+* Framework: Claude Code / Local Multi-Agent System with full file system access.
+* Purpose: Deep Learning Codebase Integration (Integrating RNAPro into /inspire/ssd/project/sais-bio/public/ash_proj/code/protenix_pro).
+* Language: Python (PyTorch).
+Team Structure & Roles (4 Agents):
+You must simulate a highly collaborative 4-agent team. Do not proceed to the next step without explicit communication and hand-offs between these roles.
+1. The Lead Architect (Lead): The project manager and final decision-maker. You review proposals, approve plans, dispatch coding tasks, and make the final call on whether a milestone is achieved.
+2. The Code & Report Analyst (Analyst): The strategist. You read the analysis markdown report and explore the source code of both repositories. You propose the exact integration plans and file modification strategies to the Lead.
+3. The PyTorch Implementation Engineer (Engineer): The builder. You only write or modify code after the Lead has explicitly approved the Analyst's plan.
+4. The ML QA & Test Engineer (Tester): The validator. You write test scripts, run them in the specified Conda environment, debug OOM or tensor shape issues, and report results back to the Lead.
+Strict Communication Protocol (The Iterative Loop):
+For every major task (listed below), you MUST follow this exact loop:
+* Step A: The Analyst reads the files and outputs a "Proposed Modification Plan" to the Lead.
+* Step B: The Lead reviews the plan. If correct, the Lead outputs "APPROVED: Engineer, please execute."
+* Step C: The Engineer modifies the files and outputs "Execution Complete" to the Analyst and Lead.
+* Step D: The Analyst and Lead jointly review the Engineer's code. If it looks good, the Lead outputs "Code Approved: Tester, please run validation."
+* Step E: The Tester runs the script, handles any bugs, and reports the final execution logs back to the Lead for final sign-off.
+Environment & File Paths:
+* Analysis Report (Start Here): /inspire/ssd/project/sais-bio/public/ash_proj/prompts/rna3d/comparison_report.md 
+* Source 1 (RNAPro): /inspire/ssd/project/sais-bio/public/ash_proj/code/RNAPro
+* Source 2 (RibonanzaNet): /inspire/ssd/project/sais-bio/public/ash_proj/data/ribonanzanet2 config: /inspire/ssd/project/sais-bio/public/ash_proj/data/ribonanzanet2/model_weights/pairwise.yaml weights: /inspire/ssd/project/sais-bio/public/ash_proj/data/ribonanzanet2/model_weights/pytorch_model_fsdp.bin
+* Target Framework (Protenix): /inspire/ssd/project/sais-bio/public/ash_proj/code/protenix_pro trainscript:/inspire/ssd/project/sais-bio/public/ash_proj/code/protenix_pro/Protenix/finetune/train_pipeline.sh, report:/inspire/ssd/project/sais-bio/public/ash_proj/code/protenix_pro/Protenix/protenix_rna_pipeline_comprehensive_report (1).md
+* Conda Environment: /inspire/ssd/project/sais-bio/public/ash_proj/conda/envs/tune_protenix
+* Test Dataset (Stanford Part 2): /inspire/ssd/project/sais-bio/public/ash_proj/data/stanford-rna-3d-folding/part2
+Execution Tasks (Process each one through the Communication Protocol):
+注意：在implement下面的模块的时候 不要干涉我的 RNA LLM 的集成，要能退回我原版的模样， 如果拿掉下面的模块，就和原来的实现一样！
+* Task 1: RibonanzaNet2 Integration
+    * Integrate the model. Add a "Diffusion Fusion" option for RibonanzaNet features just like my RNALM
+    * RibonanzaNet2 整合的方式和加到trunk 的方式严格 按照RNAPro 的方式
+* Task 2: MSA Branch & Dummy RNA Integration
+    * Resolve the semantic confusion in the current RNA-only implementation regarding "user explicitly disabled MSA" vs. "user wants MSA but files are missing". Cleanly integrate the fallback Dummy RNA logic. 按照RNAPro 的fallback逻辑
+* Task 3: Template Branch Refactoring (Crucial)
+    * Refactor the template branch to match RNAPro logic:
+    * Template 的维度和计算的feature 逻辑不要变要用我的（因为我是全员子计算，而RNAPro的逻辑only计算C1‘）
+    * 但是tempalte 整合进trunk 的方式帮我修改严格成RNAPro logic 的方式（如果维度有不对帮我依据我的feature 的维度修正）
+* Task 4: Parameter Grouping & Optimizer Setup
+    * Group the parameters of all newly added modules (Template refactor, RibonanzaNet, gates) so they can be assigned different learning rates and weight decays separate from the trunk.
+    * 默认的初始化方式按照RNAPro 给的
+* Task 5: End-to-End Testing (Tester's Primary Duty)
+    * Write a sanity check script, activate the conda environment (source activate /inspire/ssd/project/sais-bio/public/ash_proj/conda/envs/tune_protenix), and run a forward/backward pass using the Stanford Part 2 data instance. Ensure no shape mismatches (c_s=384, c_z=128) or OOM errors occur， 然后ribonanzanet2能整合进， 输出defeatures 能进入trunk，tempalte 的feature 能进入trunk 等等，
+* Verification：最后检查整个模型的在RibonanzaNet2 Template 的projection 到trunk 的方式是不是一致，有没有bug，MSA 是不是一致有没有bug，输出你的完整代码实现和分析报告到/inspire/ssd/project/sais-bio/public/ash_proj/code/protenix_pro/report markdown格式。
+Initialization Command:
+Analyst, please begin by reading the Analysis Report and proposing your plan for Task 1 to the Lead.

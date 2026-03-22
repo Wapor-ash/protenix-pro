@@ -135,6 +135,7 @@ def sample_diffusion(
     inplace_safe: bool = False,
     attn_chunk_size: Optional[int] = None,
     enable_efficient_fusion: bool = False,
+    s_rnalm: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Implements Algorithm 18 in AF3.
     It performances denoising steps from time 0 to time T.
@@ -211,6 +212,7 @@ def sample_diffusion(
                 .to(dtype)
             )
 
+            # === RNA LM: pass s_rnalm to denoise_net ===
             x_denoised = denoise_net(
                 x_noisy=x_noisy,
                 t_hat_noise_level=t_hat,
@@ -224,7 +226,9 @@ def sample_diffusion(
                 chunk_size=attn_chunk_size,
                 inplace_safe=inplace_safe,
                 enable_efficient_fusion=enable_efficient_fusion,
+                s_rnalm=s_rnalm,
             )
+            # === End RNA LM ===
 
             delta = (x_noisy - x_denoised) / t_hat[
                 ..., None, None
@@ -270,6 +274,7 @@ def sample_diffusion_training(
     diffusion_chunk_size: Optional[int] = None,
     use_conditioning: bool = True,
     enable_efficient_fusion: bool = False,
+    s_rnalm: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Implements diffusion training as described in AF3 Appendix at page 23.
     It performances denoising steps from time 0 to time T.
@@ -326,6 +331,7 @@ def sample_diffusion_training(
     noise = torch.randn_like(x_gt_augment, dtype=dtype) * sigma[..., None, None]
 
     # Get denoising outputs [..., N_sample, N_atom, 3]
+    # === RNA LM: pass s_rnalm through all denoise_net calls ===
     if diffusion_chunk_size is None:
         x_denoised = denoise_net(
             x_noisy=x_gt_augment + noise,
@@ -339,6 +345,7 @@ def sample_diffusion_training(
             c_l=c_l,
             use_conditioning=use_conditioning,
             enable_efficient_fusion=enable_efficient_fusion,
+            s_rnalm=s_rnalm,
         )
     else:
         x_denoised = []
@@ -364,8 +371,10 @@ def sample_diffusion_training(
                 c_l=c_l,
                 use_conditioning=use_conditioning,
                 enable_efficient_fusion=enable_efficient_fusion,
+                s_rnalm=s_rnalm,
             )
             x_denoised.append(x_denoised_i)
         x_denoised = torch.cat(x_denoised, dim=-3)
+    # === End RNA LM ===
 
     return x_gt_augment, x_denoised, sigma

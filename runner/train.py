@@ -214,22 +214,299 @@ class AF3Trainer(object):
             return total_params / 1e6
 
         self.print(f"Model Parameters: {count_parameters(self.model):.2f}M")
-        if self.configs.get("ema_decay", -1) > 0:
-            assert self.configs.ema_decay < 1
+
+        # === Learning rate group setup ===
+        two_stage_cfg = self.configs.get("two_stage", {})
+        self.two_stage_enable = two_stage_cfg.get("enable", False)
+        self.current_stage = 1 if self.two_stage_enable else 0  # 0 = normal, 1 = stage1, 2 = stage2
+        self._lr_group_config = None  # Set by per-group setup methods
+
+        if self.two_stage_enable:
+            self._setup_stage1()
+        else:
+            # Normal training: setup EMA
+            if self.configs.get("ema_decay", -1) > 0:
+                assert self.configs.ema_decay < 1
+                self.ema_wrapper = EMAWrapper(
+                    self.model,
+                    self.configs.ema_decay,
+                    self.configs.ema_mutable_param_keywords,
+                )
+
+            torch.cuda.empty_cache()
+
+            # Check for per-group LR config
+            adapter_lr = two_stage_cfg.get("adapter_lr", -1.0)
+            backbone_lr = two_stage_cfg.get("backbone_lr", -1.0)
+            use_per_group = (adapter_lr != -1.0 or backbone_lr != -1.0)
+
+            if use_per_group:
+                self._setup_per_group_training(adapter_lr, backbone_lr)
+            else:
+                self.optimizer = get_optimizer(
+                    self.configs,
+                    self.model,
+                    param_names=self.configs.get("finetune_params_with_substring", [""]),
+                )
+                self.init_scheduler()
+
+    def _get_adapter_keywords(self) -> list:
+        """Get the adapter keywords for per-group LR (supports comma-separated)."""
+        raw = self.configs.two_stage.get(
+            "adapter_keywords",
+            "rnalm_projection,rna_projection,dna_projection,linear_rnalm,linear_rna_llm,linear_dna_llm,"
+            "rnalm_alpha_logit,rnalm_gate_mlp,linear_no_bias_a_rna,rna_template_alpha,rna_template_gate,"
+            "layer_weights,projection_sequence_features,projection_pairwise_features,"
+            "gated_sequence_feature_injector,gated_pairwise_feature_injector,ribonanza_pairformer_stack",
+        )
+        return [k.strip() for k in raw.split(",") if k.strip()]
+
+    def _is_adapter_param(self, name: str) -> bool:
+        """Check if a parameter name matches any adapter keyword."""
+        return any(kw in name for kw in self._get_adapter_keywords())
+
+    def _split_params(self):
+        """Split model params into adapter and backbone groups.
+
+        Skips frozen parameters (requires_grad=False), e.g. RibonanzaNet2 backbone.
+        """
+        adapter_params = []
+        backbone_params = []
+        n_adapter = 0
+        n_backbone = 0
+        for name, param in self.model.named_parameters():
+            if not param.requires_grad:
+                continue  # Skip frozen params (e.g. RibonanzaNet2)
+            if self._is_adapter_param(name):
+                adapter_params.append(param)
+                n_adapter += param.numel()
+            else:
+                backbone_params.append(param)
+                n_backbone += param.numel()
+        return adapter_params, backbone_params, n_adapter, n_backbone
+
+    def _build_optimizer(self, backbone_params, adapter_params, backbone_lr, adapter_lr):
+        """Create optimizer with separate backbone/adapter param groups.
+
+        Group 0 = backbone, Group 1 = adapter.
+        Uses AdamW or Adam based on configs.adam.use_adamw.
+        """
+        param_groups = [
+            {"params": backbone_params, "lr": backbone_lr},
+            {"params": adapter_params, "lr": adapter_lr},
+        ]
+        opt_cls = torch.optim.AdamW if self.configs.adam.get("use_adamw", False) else torch.optim.Adam
+        return opt_cls(
+            param_groups,
+            lr=adapter_lr,
+            weight_decay=self.configs.adam.weight_decay,
+            betas=(self.configs.adam.beta1, self.configs.adam.beta2),
+        )
+
+    def _apply_per_group_lr(self):
+        """Apply per-group LR scaling after scheduler step.
+
+        The scheduler sets all param groups to the same LR based on scheduler_base_lr.
+        This method rescales each group to its actual target LR while preserving
+        the scheduler's warmup/decay shape.
+
+        When backbone_base_lr=0, backbone LR stays 0 throughout training (frozen).
+        """
+        if self._lr_group_config is None:
+            return
+        cfg = self._lr_group_config
+        # Get the lr that scheduler just set (same for all groups)
+        sched_lr = self.optimizer.param_groups[cfg["adapter_idx"]]["lr"]
+        base = cfg["scheduler_base_lr"]
+        if base > 1e-12:
+            scale = sched_lr / base
+        else:
+            scale = 0.0 if sched_lr == 0 else 1.0
+        self.optimizer.param_groups[cfg["adapter_idx"]]["lr"] = cfg["adapter_base_lr"] * scale
+        self.optimizer.param_groups[cfg["backbone_idx"]]["lr"] = cfg["backbone_base_lr"] * scale
+
+    def _setup_per_group_training(self, adapter_lr: float, backbone_lr: float) -> None:
+        """1-stage training with separate LRs for adapter (new modules) and backbone.
+
+        When backbone_lr=0, backbone params are effectively frozen for the entire training.
+        The scheduler's warmup/decay shape is applied proportionally to both groups.
+        """
+        global_lr = self.configs.lr
+        if adapter_lr < 0:
+            adapter_lr = global_lr
+        if backbone_lr < 0:
+            backbone_lr = global_lr
+
+        adapter_keywords = self._get_adapter_keywords()
+        adapter_params, backbone_params, n_adapter, n_backbone = self._split_params()
+
+        self.print(
+            f"[Per-group LR] adapter={n_adapter/1e6:.2f}M (lr={adapter_lr}), "
+            f"backbone={n_backbone/1e6:.2f}M (lr={backbone_lr}), "
+            f"keywords={adapter_keywords}"
+        )
+
+        self.optimizer = self._build_optimizer(
+            backbone_params, adapter_params, backbone_lr, adapter_lr
+        )
+        opt_name = "AdamW" if self.configs.adam.get("use_adamw", False) else "Adam"
+        self.print(
+            f"[Per-group LR] Optimizer: {opt_name}, backbone_lr={backbone_lr}, adapter_lr={adapter_lr}"
+        )
+
+        # Store per-group config for LR scaling
+        self._lr_group_config = {
+            "backbone_idx": 0,
+            "adapter_idx": 1,
+            "adapter_base_lr": adapter_lr,
+            "backbone_base_lr": backbone_lr,
+            "scheduler_base_lr": global_lr,  # init_scheduler uses configs.lr
+        }
+
+        self.init_scheduler()
+        # Restore per-group LRs after scheduler init (scheduler sets uniform LR)
+        self._apply_per_group_lr()
+        torch.cuda.empty_cache()
+
+    def _setup_stage1(self) -> None:
+        """Stage 1: Adapter warmup with configurable backbone/adapter LRs.
+
+        By default backbone is frozen (stage1_backbone_lr=0).
+        No EMA in Stage 1.
+        """
+        self.current_stage = 1
+        stage_cfg = self.configs.two_stage
+        adapter_keywords = self._get_adapter_keywords()
+
+        stage1_adapter_lr = stage_cfg.get("stage1_adapter_lr", stage_cfg.get("stage1_lr", 5e-3))
+        stage1_backbone_lr = stage_cfg.get("stage1_backbone_lr", 0.0)
+
+        adapter_params, backbone_params, n_adapter, n_backbone = self._split_params()
+
+        self.print(
+            f"[Stage 1] Adapter warmup: backbone={n_backbone/1e6:.2f}M (lr={stage1_backbone_lr}), "
+            f"adapter={n_adapter/1e6:.2f}M (lr={stage1_adapter_lr}), keywords={adapter_keywords}"
+        )
+
+        # No EMA in Stage 1
+        if hasattr(self, "ema_wrapper"):
+            delattr(self, "ema_wrapper")
+
+        self.optimizer = self._build_optimizer(
+            backbone_params, adapter_params, stage1_backbone_lr, stage1_adapter_lr
+        )
+        opt_name = "AdamW" if self.configs.adam.get("use_adamw", False) else "Adam"
+        self.print(
+            f"[Stage 1] Optimizer: {opt_name}, backbone_lr={stage1_backbone_lr}, adapter_lr={stage1_adapter_lr}"
+        )
+
+        stage1_warmup = stage_cfg.get("stage1_warmup_steps", 1)
+        stage1_max = stage_cfg.get("stage1_max_steps", 400)
+        self.lr_scheduler = get_lr_scheduler(
+            Namespace(
+                lr_scheduler="cosine_annealing",
+                warmup_steps=stage1_warmup,
+                max_steps=stage1_max,
+                lr=stage1_adapter_lr,
+                min_lr_ratio=0.01,
+            ),
+            self.optimizer,
+        )
+
+        self._lr_group_config = {
+            "backbone_idx": 0,
+            "adapter_idx": 1,
+            "adapter_base_lr": stage1_adapter_lr,
+            "backbone_base_lr": stage1_backbone_lr,
+            "scheduler_base_lr": stage1_adapter_lr,
+        }
+        self._apply_per_group_lr()
+
+        self.print(
+            f"[Stage 1] Scheduler: cosine, warmup={stage1_warmup}, "
+            f"max_steps={stage1_max}, adapter_lr={stage1_adapter_lr}, backbone_lr={stage1_backbone_lr}"
+        )
+
+        torch.cuda.empty_cache()
+
+    def _transition_to_stage2(self) -> None:
+        """Stage 2: Joint training with configurable backbone/adapter LRs.
+
+        Defaults: stage2_adapter_lr = stage1_adapter_lr, stage2_backbone_lr = stage2_adapter_lr.
+        Enables EMA.
+        """
+        self.current_stage = 2
+        stage_cfg = self.configs.two_stage
+
+        # Unfreeze all parameters except permanently frozen ones (e.g. RibonanzaNet2)
+        for name, param in self.model.named_parameters():
+            if "ribonanza_net." not in name:
+                param.requires_grad = True
+
+        n_total = sum(p.numel() for p in self.model.parameters()) / 1e6
+        self.print(f"[Stage 2] Joint training: all {n_total:.2f}M params trainable")
+
+        # Resolve LRs with defaults
+        stage1_adapter_lr = stage_cfg.get("stage1_adapter_lr", stage_cfg.get("stage1_lr", 5e-3))
+        stage2_adapter_lr = stage_cfg.get("stage2_adapter_lr", -1.0)
+        if stage2_adapter_lr <= 0:
+            stage2_adapter_lr = stage1_adapter_lr
+        stage2_backbone_lr = stage_cfg.get("stage2_backbone_lr", -1.0)
+        if stage2_backbone_lr <= 0:
+            stage2_backbone_lr = stage2_adapter_lr
+
+        adapter_params, backbone_params, _, _ = self._split_params()
+
+        self.optimizer = self._build_optimizer(
+            backbone_params, adapter_params, stage2_backbone_lr, stage2_adapter_lr
+        )
+        opt_name = "AdamW" if self.configs.adam.get("use_adamw", False) else "Adam"
+        self.print(
+            f"[Stage 2] Optimizer: {opt_name}, backbone_lr={stage2_backbone_lr}, adapter_lr={stage2_adapter_lr}"
+        )
+
+        # Create scheduler for Stage 2
+        stage2_warmup = stage_cfg.get("stage2_warmup_steps", 100)
+        stage2_max = self.configs.max_steps
+        stage1_max = stage_cfg.get("stage1_max_steps", 400)
+        stage2_total = stage2_max - stage1_max
+        self.lr_scheduler = get_lr_scheduler(
+            Namespace(
+                lr_scheduler="cosine_annealing",
+                warmup_steps=stage2_warmup,
+                max_steps=stage2_total,
+                lr=stage2_adapter_lr,
+                min_lr_ratio=0.01,
+            ),
+            self.optimizer,
+        )
+
+        self._lr_group_config = {
+            "backbone_idx": 0,
+            "adapter_idx": 1,
+            "adapter_base_lr": stage2_adapter_lr,
+            "backbone_base_lr": stage2_backbone_lr,
+            "scheduler_base_lr": stage2_adapter_lr,
+        }
+        self._apply_per_group_lr()
+
+        self.print(
+            f"[Stage 2] Scheduler: cosine, warmup={stage2_warmup}, "
+            f"max_steps={stage2_total}, adapter_lr={stage2_adapter_lr}, backbone_lr={stage2_backbone_lr}"
+        )
+
+        # Enable EMA in Stage 2
+        ema_decay = stage_cfg.get("stage2_ema_decay", 0.999)
+        if ema_decay > 0:
             self.ema_wrapper = EMAWrapper(
                 self.model,
-                self.configs.ema_decay,
+                ema_decay,
                 self.configs.ema_mutable_param_keywords,
             )
             self.ema_wrapper.register()
+            self.print(f"[Stage 2] EMA enabled with decay={ema_decay}")
 
         torch.cuda.empty_cache()
-        self.optimizer = get_optimizer(
-            self.configs,
-            self.model,
-            param_names=self.configs.get("finetune_params_with_substring", [""]),
-        )
-        self.init_scheduler()
 
     def init_scheduler(self, **kwargs: Any) -> None:
         """
@@ -292,6 +569,25 @@ class AF3Trainer(object):
         Loads both standard and EMA checkpoints if configured.
         """
 
+        def _repair_rna_template_projector_after_load(
+            checkpoint_keys: set,
+            checkpoint_label: str,
+        ) -> None:
+            """Run post-load RNA template projector repair before EMA registration."""
+            rna_cfg = self.configs.get("rna_template", {})
+            if rna_cfg.get("enable", False):
+                result = self.raw_model.reinit_rna_projector_from_protein(
+                    checkpoint_keys=checkpoint_keys
+                )
+                self.print(
+                    f"RNA projector init after {checkpoint_label} load: {result}"
+                )
+
+        def _register_ema_shadow_if_needed() -> None:
+            """Register EMA shadow once the model weights are fully repaired."""
+            if hasattr(self, "ema_wrapper") and not self.ema_wrapper.shadow:
+                self.ema_wrapper.register()
+
         def _load_checkpoint(
             checkpoint_path: str,
             load_params_only: bool,
@@ -299,7 +595,7 @@ class AF3Trainer(object):
             skip_load_step: bool = False,
             skip_load_scheduler: bool = False,
             load_step_for_scheduler: bool = True,
-        ) -> None:
+        ) -> set:
             """
             Internal helper to load a single checkpoint.
 
@@ -310,6 +606,9 @@ class AF3Trainer(object):
                 skip_load_step (bool): If True, do not load training step.
                 skip_load_scheduler (bool): If True, do not load scheduler state.
                 load_step_for_scheduler (bool): If True, re-initialize scheduler with loaded step.
+
+            Returns:
+                set: The set of keys present in the checkpoint model state dict.
             """
             if not os.path.exists(checkpoint_path):
                 raise FileNotFoundError(
@@ -328,6 +627,8 @@ class AF3Trainer(object):
                 checkpoint["model"] = {
                     k[len("module.") :]: v for k, v in checkpoint["model"].items()
                 }
+
+            checkpoint_keys = set(checkpoint["model"].keys())
 
             self.model.load_state_dict(
                 state_dict=checkpoint["model"],
@@ -353,18 +654,22 @@ class AF3Trainer(object):
                     self.init_scheduler(last_epoch=self.step - 1)
 
             self.print(f"Finish loading checkpoint, current step: {self.step}")
+            return checkpoint_keys
 
         # Load EMA model parameters if configured
         if self.configs.load_ema_checkpoint_path:
-            _load_checkpoint(
+            ema_ckpt_keys = _load_checkpoint(
                 self.configs.load_ema_checkpoint_path,
                 load_params_only=True,
             )
-            self.ema_wrapper.register()
+            _repair_rna_template_projector_after_load(
+                ema_ckpt_keys, "EMA checkpoint"
+            )
+            _register_ema_shadow_if_needed()
 
         # Load standard model checkpoint if configured
         if self.configs.load_checkpoint_path:
-            _load_checkpoint(
+            ckpt_keys = _load_checkpoint(
                 self.configs.load_checkpoint_path,
                 self.configs.load_params_only,
                 skip_load_optimizer=self.configs.skip_load_optimizer,
@@ -372,6 +677,9 @@ class AF3Trainer(object):
                 skip_load_step=self.configs.skip_load_step,
                 load_step_for_scheduler=self.configs.load_step_for_scheduler,
             )
+            _repair_rna_template_projector_after_load(ckpt_keys, "checkpoint")
+
+        _register_ema_shadow_if_needed()
 
     def print(self, msg: str) -> None:
         """
@@ -548,6 +856,24 @@ class AF3Trainer(object):
                     )
                     simple_metrics.update(loss_dict)
 
+                    # RNA-only internal LDDT for monitoring
+                    is_rna = batch["input_feature_dict"].get("is_rna", None)
+                    if is_rna is not None and is_rna.sum() > 0:
+                        rna_lddt_mask = (
+                            batch["label_dict"]["lddt_mask"]
+                            * is_rna.float().unsqueeze(-1)
+                            * is_rna.float().unsqueeze(-2)
+                        )
+                        if rna_lddt_mask.sum() > 0:
+                            rna_lddt = self.lddt_metrics.lddt_base.forward(
+                                pred_coordinate=batch["pred_dict"]["coordinate"],
+                                true_coordinate=batch["label_dict"]["coordinate"],
+                                lddt_mask=rna_lddt_mask,
+                                chunk_size=self.lddt_metrics.chunk_size,
+                            )  # [N_sample]
+                            simple_metrics["rna_lddt/mean"] = rna_lddt.mean()
+                            simple_metrics["rna_lddt/best"] = rna_lddt.max()
+
                 # Update metric aggregator
                 for key, value in simple_metrics.items():
                     simple_metric_wrapper.add(
@@ -620,6 +946,7 @@ class AF3Trainer(object):
             scaler.update()
             self.optimizer.zero_grad(set_to_none=True)
             self.lr_scheduler.step()
+            self._apply_per_group_lr()
 
         for key, value in loss_dict.items():
             if "loss" not in key:
@@ -660,6 +987,7 @@ class AF3Trainer(object):
         """
         Main entry point for the AF3Trainer.
         Handles the complete training cycle including evaluation, logging, and checkpointing.
+        Supports two-stage training: Stage 1 (adapter warmup) -> Stage 2 (joint training).
         """
         if self.configs.eval_only or self.configs.eval_first:
             self.evaluate()
@@ -667,6 +995,15 @@ class AF3Trainer(object):
                 return
         use_ema = hasattr(self, "ema_wrapper")
         self.print(f"Using EMA: {use_ema}")
+
+        # Two-stage training: determine stage1 boundary
+        stage1_max_steps = 0
+        if self.two_stage_enable:
+            stage1_max_steps = self.configs.two_stage.get("stage1_max_steps", 400)
+            self.print(
+                f"[Two-Stage] Stage 1: steps 0-{stage1_max_steps}, "
+                f"Stage 2: steps {stage1_max_steps}-{self.configs.max_steps}"
+            )
 
         while True:
             for batch in self.train_dl:
@@ -691,13 +1028,20 @@ class AF3Trainer(object):
                 batch = to_device(batch, self.device)
                 self.progress_bar()
                 self.train_step(batch)
+
+                use_ema = hasattr(self, "ema_wrapper")
                 if use_ema and is_update_step:
                     self.ema_wrapper.update()
 
                 if step_need_log or is_last_step:
                     metrics = self.train_metric_wrapper.calc()
-                    self.print(f"Step {self.step} train metrics: {metrics}")
-                    last_lr = self.lr_scheduler.get_last_lr()
+                    stage_tag = f"[Stage {self.current_stage}] " if self.two_stage_enable else ""
+                    self.print(f"{stage_tag}Step {self.step} train metrics: {metrics}")
+                    # Show actual param group LRs (may differ from scheduler with per-group LR)
+                    if self._lr_group_config is not None:
+                        last_lr = [g["lr"] for g in self.optimizer.param_groups]
+                    else:
+                        last_lr = self.lr_scheduler.get_last_lr()
                     if DIST_WRAPPER.rank == 0:
                         if self.configs.use_wandb:
                             lr_dict = {"train/lr": last_lr[0]}
@@ -723,6 +1067,21 @@ class AF3Trainer(object):
                 self.global_step += 1
                 if self.global_step % self.iters_to_accumulate == 0:
                     self.step += 1
+
+                # === Two-stage: transition from Stage 1 to Stage 2 ===
+                if (
+                    self.two_stage_enable
+                    and self.current_stage == 1
+                    and self.step >= stage1_max_steps
+                ):
+                    self.print(
+                        f"[Two-Stage] Stage 1 complete at step {self.step}. "
+                        f"Transitioning to Stage 2..."
+                    )
+                    # Save Stage 1 checkpoint
+                    self.save_checkpoint()
+                    self._transition_to_stage2()
+                    self.print(f"[Two-Stage] Stage 2 started at step {self.step}")
 
                 if self.step >= self.configs.max_steps:
                     self.print(f"Finished training after {self.step} steps")

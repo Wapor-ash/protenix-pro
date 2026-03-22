@@ -26,6 +26,8 @@ from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
 from protenix.data.esm.esm_featurizer import ESMFeaturizer
 from protenix.data.inference.json_to_feature import SampleDictToFeatures
+from protenix.data.rna_template.rna_template_featurizer import RNATemplateFeaturizer
+from protenix.data.rnalm.rnalm_featurizer import RiNALMoFeaturizer
 from protenix.data.msa.msa_featurizer import InferenceMSAFeaturizer
 from protenix.data.template.template_featurizer import InferenceTemplateFeaturizer
 from protenix.data.template.template_utils import TemplateHitFeaturizer
@@ -137,6 +139,124 @@ class InferenceDataset(Dataset):
                 error_dir="./esm_embeddings/",
             )
 
+        # === RNA LM (RiNALMo) Featurizer ===
+        rnalm_info = configs.get("rnalm", {})
+        self.rnalm_enable = rnalm_info.get("enable", False)
+        self.rnalm_separate_dna = rnalm_info.get("separate_dna_projection", False)
+        self.rnalm_featurizer = None
+        if self.rnalm_enable:
+            use_rna = rnalm_info.get("use_rna_embed", True)
+            use_dna = rnalm_info.get("use_dna_embed", True)
+
+            if not use_rna and not use_dna:
+                logger.info("rnalm.enable=True but both use_rna/use_dna are False. Disabling rnalm.")
+                self.rnalm_enable = False
+            else:
+                rnalm_embedding_dir = rnalm_info.get("embedding_dir", "") if use_rna else ""
+                rnalm_sequence_fpath = rnalm_info.get("sequence_fpath", "") if use_rna else ""
+                dna_embedding_dir = rnalm_info.get("dna_embedding_dir", "") if use_dna else ""
+                dna_sequence_fpath = rnalm_info.get("dna_sequence_fpath", "") if use_dna else ""
+
+                # Fail-fast: if use_rna/use_dna is True but paths are missing, raise.
+                if use_rna and (not rnalm_embedding_dir or not rnalm_sequence_fpath):
+                    raise ValueError(
+                        "rnalm.enable=True and use_rna_embed=True but RNA embedding paths "
+                        f"are missing for inference. embedding_dir='{rnalm_embedding_dir}', "
+                        f"sequence_fpath='{rnalm_sequence_fpath}'. "
+                        "Either provide valid paths or set rnalm.use_rna_embed=false."
+                    )
+                if use_dna and (not dna_embedding_dir or not dna_sequence_fpath):
+                    raise ValueError(
+                        "rnalm.enable=True and use_dna_embed=True but DNA embedding paths "
+                        f"are missing for inference. dna_embedding_dir='{dna_embedding_dir}', "
+                        f"dna_sequence_fpath='{dna_sequence_fpath}'. "
+                        "Either provide valid paths or set rnalm.use_dna_embed=false."
+                    )
+
+                self.rnalm_featurizer = RiNALMoFeaturizer(
+                    embedding_dir=rnalm_embedding_dir,
+                    sequence_fpath=rnalm_sequence_fpath,
+                    embedding_dim=rnalm_info.get("embedding_dim", 1280),
+                    error_dir="./rnalm_embeddings/",
+                    dna_embedding_dir=dna_embedding_dir,
+                    dna_sequence_fpath=dna_sequence_fpath,
+                    dna_embedding_dim=rnalm_info.get("dna_embedding_dim", 1024),
+                    use_rna_embed=use_rna,
+                    use_dna_embed=use_dna,
+                )
+                logger.info(
+                    f"RiNALMo featurizer enabled for inference: "
+                    f"use_rna={use_rna}, use_dna={use_dna}, "
+                    f"separate_dna={self.rnalm_separate_dna}"
+                )
+        # === End RNA LM ===
+
+        # === RNA Template Featurizer ===
+        rna_template_info = configs.get("rna_template", {})
+        self.rna_template_enable = rna_template_info.get("enable", False)
+        self.rna_template_featurizer = None
+        if self.rna_template_enable:
+            template_database_dir = rna_template_info.get("template_database_dir", "")
+            template_index_path = rna_template_info.get("template_index_path", "")
+            max_rna_templates = rna_template_info.get("max_rna_templates", 4)
+            search_results_path = rna_template_info.get("search_results_path", "")
+            cif_database_dir = rna_template_info.get("cif_database_dir", "")
+
+            online_mode = bool(search_results_path and cif_database_dir)
+
+            if online_mode:
+                if not os.path.exists(search_results_path):
+                    raise FileNotFoundError(
+                        f"rna_template.search_results_path='{search_results_path}' "
+                        "does not exist for inference."
+                    )
+                if not os.path.isdir(cif_database_dir):
+                    raise FileNotFoundError(
+                        f"rna_template.cif_database_dir='{cif_database_dir}' "
+                        "does not exist for inference."
+                    )
+            else:
+                if not template_database_dir or not template_index_path:
+                    raise ValueError(
+                        "rna_template.enable=True but neither online mode (search_results_path + "
+                        "cif_database_dir) nor offline mode (template_database_dir + template_index_path) "
+                        "is configured for inference."
+                    )
+                if not os.path.isdir(template_database_dir):
+                    raise FileNotFoundError(
+                        f"rna_template.template_database_dir='{template_database_dir}' "
+                        "does not exist for inference."
+                    )
+                if not os.path.exists(template_index_path):
+                    raise FileNotFoundError(
+                        f"rna_template.template_index_path='{template_index_path}' "
+                        "does not exist for inference."
+                    )
+
+            self.rna_template_featurizer = RNATemplateFeaturizer(
+                template_database_dir=template_database_dir,
+                template_index_path=template_index_path,
+                max_templates=max_rna_templates,
+                rna3db_metadata_path=rna_template_info.get("rna3db_metadata_path", ""),
+                search_results_path=search_results_path,
+                cif_database_dir=cif_database_dir,
+            )
+            mode_str = "ONLINE" if online_mode else "OFFLINE"
+            logger.info(
+                f"RNA template featurizer enabled for inference [{mode_str}]: "
+                f"max_templates={max_rna_templates}"
+            )
+        # === End RNA Template ===
+
+        # === RibonanzaNet2 Tokenizer ===
+        rnet2_configs = configs.get("ribonanzanet2", {})
+        self.ribonanza_tokenizer = None
+        if rnet2_configs.get("enable", False):
+            from protenix.data.ribonanza.ribonanza_tokenizer import RibonanzaTokenizer
+            self.ribonanza_tokenizer = RibonanzaTokenizer()
+            logger.info("RibonanzaNet2 tokenizer enabled for inference.")
+        # === End RibonanzaNet2 Tokenizer ===
+
     def process_one(
         self,
         single_sample_dict: Mapping[str, Any],
@@ -191,6 +311,56 @@ class InferenceDataset(Dataset):
                 inference_mode=True,
             )
             features_dict["esm_token_embedding"] = x_esm
+
+        # === RNA LM (RiNALMo) features ===
+        if self.rnalm_enable and self.rnalm_featurizer is not None:
+            if self.rnalm_separate_dna:
+                result = self.rnalm_featurizer(
+                    token_array=token_array,
+                    atom_array=atom_array,
+                    bioassembly_dict=single_sample_dict,
+                    inference_mode=True,
+                    return_separate=True,
+                )
+                # Only set keys returned by featurizer (respects use_rna/use_dna)
+                if "rna_llm_embedding" in result:
+                    features_dict["rna_llm_embedding"] = result["rna_llm_embedding"]
+                if "dna_llm_embedding" in result:
+                    features_dict["dna_llm_embedding"] = result["dna_llm_embedding"]
+            else:
+                x_rnalm = self.rnalm_featurizer(
+                    token_array=token_array,
+                    atom_array=atom_array,
+                    bioassembly_dict=single_sample_dict,
+                    inference_mode=True,
+                    return_separate=False,
+                )
+                features_dict["rnalm_token_embedding"] = x_rnalm
+        # === End RNA LM ===
+
+        # === RNA Template Features ===
+        if self.rna_template_enable and self.rna_template_featurizer is not None:
+            import numpy as np
+            rna_template_features = self.rna_template_featurizer(
+                token_array=token_array,
+                atom_array=atom_array,
+                bioassembly_dict=single_sample_dict,
+                inference_mode=True,
+            )
+            for key, value in rna_template_features.items():
+                features_dict[key] = (
+                    torch.from_numpy(value) if isinstance(value, np.ndarray) else value
+                )
+        # === End RNA Template ===
+
+        # === RibonanzaNet2 Tokenizer ===
+        if self.ribonanza_tokenizer is not None:
+            ribo_result = self.ribonanza_tokenizer(
+                token_array=token_array,
+                atom_array=atom_array,
+            )
+            features_dict.update(ribo_result)
+        # === End RibonanzaNet2 Tokenizer ===
 
         # Make dummy features for not implemented features
         dummy_feats = []

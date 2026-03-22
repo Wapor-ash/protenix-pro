@@ -52,6 +52,34 @@ basic_configs = {
     "eval_ema_only": False,  # whether wandb only tracking ema checkpoint metrics
     "ema_mutable_param_keywords": [""],
     "model_name": "protenix_base_default_v1.0.0",  # train model name
+    # === RNA-specific loss weight overrides ===
+    "rna_loss": {
+        "enable": False,              # Set True to use RNA-optimized loss weights
+        "alpha_distogram": 0.10,      # Default: 0.03 -> 0.10 (enhance distance distribution)
+        "alpha_bond": 0.5,            # Default: 0.0 -> 0.5 (enable bond constraints)
+        "weight_rna": 8.0,            # Default: 5.0 -> 8.0 (increase RNA atom weight)
+    },
+    # === Two-stage training / per-group LR for RNA LM adapter ===
+    "two_stage": {
+        "enable": False,
+        # Comma-separated substrings to identify adapter (new module) params
+        "adapter_keywords": "rnalm_projection,rna_projection,dna_projection,linear_rnalm,linear_rna_llm,linear_dna_llm,rnalm_alpha_logit,rnalm_gate_mlp,linear_no_bias_a_rna,rna_template_alpha,rna_template_gate,layer_weights,projection_sequence_features,projection_pairwise_features,gated_sequence_feature_injector,gated_pairwise_feature_injector,ribonanza_pairformer_stack",
+        # === 1-stage per-group LR (used when enable=False) ===
+        # Set adapter_lr and/or backbone_lr to enable per-group LR splitting.
+        # -1 means use the global lr for that group. 0 means freeze.
+        "adapter_lr": -1.0,            # LR for adapter (new module) params
+        "backbone_lr": -1.0,           # LR for original backbone params
+        # === Stage 1: adapter warmup ===
+        "stage1_max_steps": 400,       # Steps for Stage 1
+        "stage1_adapter_lr": 5e-3,     # Adapter LR in Stage 1
+        "stage1_backbone_lr": 0.0,     # Backbone LR in Stage 1 (0 = frozen)
+        "stage1_warmup_steps": 1,      # Warmup steps for Stage 1
+        # === Stage 2: joint training ===
+        "stage2_adapter_lr": -1.0,     # Adapter LR in Stage 2 (-1 = same as stage1_adapter_lr)
+        "stage2_backbone_lr": -1.0,    # Backbone LR in Stage 2 (-1 = same as stage2_adapter_lr)
+        "stage2_warmup_steps": 100,    # Warmup steps for Stage 2
+        "stage2_ema_decay": 0.999,     # EMA decay for Stage 2
+    },
 }
 data_configs = {
     # Data
@@ -67,6 +95,92 @@ data_configs = {
         "enable": False,
         "model_name": "esm2-3b",
         "embedding_dim": 2560,
+        "embedding_dir": "",        # directory containing pre-computed ESM .pt files
+        "sequence_fpath": "",       # CSV mapping protein sequences to embedding files
+    },
+    # === RNA LM (RiNALMo / AIDO) Embedding Config ===
+    # Inject RNA/DNA language model representations into the Diffusion Conditioning Module.
+    # model_name: "rinalmo" (1280-dim) or "aido" (2048-dim)
+    # Fusion method is always "add": s_rnalm is added to s_trunk before concat with s_inputs.
+    # embedding_dir: directory containing pre-computed RNA .pt files.
+    # sequence_fpath: CSV mapping RNA sequences to embedding files.
+    # dna_embedding_dir: directory containing pre-computed DNA .pt files (empty = skip DNA).
+    # dna_sequence_fpath: CSV mapping DNA sequences to embedding files (empty = skip DNA).
+    "rnalm": {
+        "enable": False,
+        "use_rna_embed": True,      # Whether to load and use RNA LLM embeddings
+        "use_dna_embed": True,      # Whether to load and use DNA LLM embeddings
+        "model_name": "rinalmo",    # "rinalmo" or "aido"
+        "embedding_dim": 1280,
+        "gate_mode": "none",        # "none", "scalar", "token", "dual"
+        "gate_init_logit": -3.0,    # Initial logit for gates (sigmoid(-3) ≈ 0.047)
+        "embedding_dir": "",
+        "sequence_fpath": "",
+        # DNA embedding paths (only used when model supports DNA, e.g. AIDO)
+        "dna_embedding_dir": "",
+        "dna_sequence_fpath": "",
+        # injection_mode controls WHERE RNA LLM embeddings are injected:
+        #   "diffusion" - inject at DiffusionConditioning (add to s_trunk before diffusion)
+        #   "input"     - inject at InputFeatureEmbedder (add to s_inputs, like ESM)
+        #   "both"      - inject at both locations
+        "injection_mode": "diffusion",
+        # separate_dna_projection: when True, RNA and DNA get independent projection layers
+        # (RNA embedding -> rna_projection -> add to RNA features,
+        #  DNA embedding -> dna_projection -> add to DNA features)
+        # When False (default), combined pathway with zero-padded DNA (legacy behavior)
+        "separate_dna_projection": False,
+        # dna_embedding_dim: native DNA embedding dimension (only used when separate_dna_projection=True)
+        # AIDO.DNA-300M outputs 1024-dim; when separate=False, DNA is zero-padded to embedding_dim
+        "dna_embedding_dim": 1024,
+    },
+    # === RNA Template Config ===
+    # Inject RNA structural templates into TemplateEmbedder (parallel to protein templates).
+    # Uses pre-computed template tensors from rna_template/compute/ pipeline.
+    # template_database_dir: directory containing pre-computed RNA template .npz files.
+    # template_index_path: JSON mapping RNA sequences to template .npz file paths.
+    # max_rna_templates: maximum number of RNA templates per chain (same as protein, default 4).
+    # injection_mode: "z_init" adds RNA template output to z_init (like protein template);
+    #                 "diffusion" adds via diffusion conditioning (like RNA LLM).
+    "rna_template": {
+        "enable": False,
+        "template_database_dir": "",        # Directory with pre-computed RNA template .npz files
+        "template_index_path": "",          # JSON: RNA sequence -> list of template .npz paths
+        "max_rna_templates": 4,             # Max templates per RNA chain
+        "rna3db_metadata_path": "",         # RNA3DB filter.json for per-query temporal filtering & self-hit exclusion
+        "injection_mode": "z_init",         # "z_init" (default, like protein) or "diffusion"
+        # projector_init: how to initialize the RNA template projector
+        #   "protein" — copy weights from protein projector + use learnable alpha gate (default)
+        #   "zero"    — zero-init weights, add directly to pairwise like protein (no alpha gate)
+        # In both cases, if checkpoint already contains RNA projector weights, they are used as-is.
+        "projector_init": "protein",
+        "alpha_init": 0.01,                 # Initial scale for alpha gate (only used when projector_init="protein")
+        # === Online mode (v3) ===
+        # When search_results_path + cif_database_dir are both set, online mode is activated:
+        #   - Templates are built from CIF files at training time (per-hit)
+        #   - template_index_path is NOT required (offline NPZ index is bypassed)
+        #   - Mirrors protein template pipeline's online approach
+        "search_results_path": "",          # Path to search_results.json from MMseqs2 search
+        "cif_database_dir": "",             # Root directory of CIF structure files (flat or rna3db-mmcifs layout)
+        # === Manual template hints (v6) ===
+        # JSON file mapping training PDB IDs to per-entity manual template hints.
+        # Format: { "pdb_id": { "entity_id": { "mode": "hybrid", "manual_templates": [...] } } }
+        # When set, manual hints are available during training/finetune (not just inference).
+        # Entities/PDBs not in the file use the default online/offline search pipeline.
+        "manual_template_hints_path": "",
+    },
+    # === RibonanzaNet2 Integration (following RNAPro pattern) ===
+    # Loads a pretrained RibonanzaNet2 model (frozen) and extracts multi-layer
+    # sequence + pairwise features. Features are aggregated via learnable layer weights,
+    # projected through MLPs, and injected into s_inputs / z_init via gated mechanisms.
+    # Dedicated 4-block PairformerStack processes the pairwise features.
+    "ribonanzanet2": {
+        "enable": False,
+        # Path to directory containing pairwise.yaml and pytorch_model_fsdp.bin
+        "model_dir": "",
+        # Number of PairformerStack blocks for processing pairwise features
+        "n_pairformer_blocks": 4,
+        # Gate type for injectors: "channel" (per-channel sigmoid) or "scalar" (single sigmoid)
+        "gate_type": "channel",
     },
 }
 optim_configs = {
@@ -201,6 +315,8 @@ model_configs = {
         "template_embedder": {
             "c": 64,
             "c_z": GlobalConfigValue("c_z"),
+            "c_s": GlobalConfigValue("c_s"),
+            "c_s_inputs": GlobalConfigValue("c_s_inputs"),
             "n_blocks": 0,
             "dropout": 0.25,
             "blocks_per_ckpt": GlobalConfigValue("blocks_per_ckpt"),

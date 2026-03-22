@@ -169,12 +169,58 @@ class InferenceRunner(object):
             checkpoint["model"] = {
                 k[len("module.") :]: v for k, v in checkpoint["model"].items()
             }
-        self.model.load_state_dict(
+        load_result = self.model.load_state_dict(
             state_dict=checkpoint["model"],
             strict=self.configs.load_strict,
         )
         self.model.eval()
         self.print("Finish loading checkpoint.")
+
+        # === Inference projector validation ===
+        # If any projector-based feature (rnalm, rna_llm, dna_llm, rna_template)
+        # is enabled, the corresponding projector weights MUST exist in the
+        # checkpoint. Inference should never silently use uninitialized projectors.
+        ckpt_keys = set(checkpoint["model"].keys())
+
+        rnalm_configs = self.configs.get("rnalm", {})
+        if rnalm_configs.get("enable", False):
+            rnalm_keys_in_ckpt = [
+                k for k in ckpt_keys
+                if any(s in k for s in [
+                    "rna_projection", "dna_projection", "rnalm_projection",
+                    "linear_rna_llm", "linear_dna_llm", "linear_rnalm",
+                    "rnalm_alpha_logit", "rnalm_gate_mlp",
+                ])
+            ]
+            if not rnalm_keys_in_ckpt:
+                raise RuntimeError(
+                    "rnalm.enable=True but checkpoint contains NO RNA/DNA LM projector weights. "
+                    "Inference requires a finetuned checkpoint that was trained with rnalm.enable=True. "
+                    "Either load a proper checkpoint or set rnalm.enable=false."
+                )
+            else:
+                self.print(
+                    f"RNA/DNA LM weights found in checkpoint: {rnalm_keys_in_ckpt}"
+                )
+
+        rna_template_configs = self.configs.get("rna_template", {})
+        if rna_template_configs.get("enable", False):
+            rna_tpl_keys_in_ckpt = [
+                k for k in ckpt_keys
+                if "linear_no_bias_a_rna" in k or "rna_template_alpha" in k
+            ]
+            if not rna_tpl_keys_in_ckpt:
+                raise RuntimeError(
+                    "rna_template.enable=True but checkpoint contains NO RNA template projector weights "
+                    "(linear_no_bias_a_rna). Inference requires a finetuned checkpoint that was trained "
+                    "with rna_template.enable=True. Either load a proper checkpoint or set "
+                    "rna_template.enable=false."
+                )
+            else:
+                self.print(
+                    f"RNA template weights found in checkpoint: {rna_tpl_keys_in_ckpt}"
+                )
+        # === End inference projector validation ===
 
         def count_parameters(model: torch.nn.Module) -> float:
             """Count total parameters in millions."""
@@ -339,6 +385,13 @@ def download_inference_cache(configs: Any) -> None:
     checkpoint_dir = configs.load_checkpoint_dir
 
     if not opexists(checkpoint_path):
+        if configs.model_name not in URL:
+            raise FileNotFoundError(
+                f"Checkpoint not found at {checkpoint_path} and model_name "
+                f"'{configs.model_name}' has no download URL. "
+                f"Please provide a valid --load_checkpoint_dir pointing to "
+                f"the directory containing '{configs.model_name}.pt'."
+            )
         os.makedirs(checkpoint_dir, exist_ok=True)
         tos_url = URL[configs.model_name]
         logger.info(
@@ -596,7 +649,14 @@ def run() -> None:
 
     # 2. Get model specifics and merge into base defaults
     base_configs = {**configs_base, **{"data": data_configs}, **inference_configs}
-    model_specfics_configs = model_configs[model_name]
+    if model_name not in model_configs:
+        logger.warning(
+            f"model_name '{model_name}' not found in model_configs. "
+            f"Using base defaults. Available: {list(model_configs.keys())}"
+        )
+        model_specfics_configs = {}
+    else:
+        model_specfics_configs = model_configs[model_name]
 
     def deep_update(d, u):
         for k, v in u.items():
