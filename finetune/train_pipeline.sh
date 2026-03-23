@@ -75,6 +75,7 @@ validate_config() {
     as_bool "${USE_WANDB}" >/dev/null
     as_bool "${PRINT_ONLY}" >/dev/null
     as_bool "${USE_RNALM}" >/dev/null
+    as_bool "${USE_RIBONANZA}" >/dev/null
     as_bool "${USE_RNA}" >/dev/null
     as_bool "${USE_DNA}" >/dev/null
     as_bool "${USE_RNA_TEMPLATE}" >/dev/null
@@ -122,6 +123,13 @@ validate_config() {
     if [ "$(as_bool "${USE_RNA_MSA}")" = "true" ]; then
         require_dir "${RNA_MSA_RAW_DIR}" "RNA_MSA_RAW_DIR"
         require_file "${RNA_MSA_INDEX_JSON}" "RNA_MSA_INDEX_JSON"
+    fi
+
+    if [ "$(as_bool "${USE_RIBONANZA}")" = "true" ]; then
+        require_dir "${RIBONANZA_MODEL_DIR}" "RIBONANZA_MODEL_DIR"
+        require_file "${RIBONANZA_MODEL_DIR}/pairwise.yaml" "Ribonanza pairwise.yaml"
+        require_file "${RIBONANZA_MODEL_DIR}/pytorch_model_fsdp.bin" "Ribonanza weights"
+        validate_choice "${RIBONANZA_GATE_TYPE}" "RIBONANZA_GATE_TYPE" "channel" "scalar"
     fi
 }
 
@@ -183,16 +191,37 @@ build_rna_template_args() {
     fi
 }
 
+build_ribonanza_args() {
+    RIBONANZA_ARGS=()
+    if [ "$(as_bool "${USE_RIBONANZA}")" != "true" ]; then
+        RIBONANZA_ARGS=(--ribonanzanet2.enable false)
+        return 0
+    fi
+
+    RIBONANZA_ARGS=(
+        --ribonanzanet2.enable true
+        --ribonanzanet2.model_dir "${RIBONANZA_MODEL_DIR}"
+        --ribonanzanet2.gate_type "${RIBONANZA_GATE_TYPE}"
+        --ribonanzanet2.n_pairformer_blocks "${RIBONANZA_N_PAIRFORMER_BLOCKS}"
+    )
+}
+
 build_common_args() {
     local resolved_run_name="${RUN_NAME}"
     if [ -z "${resolved_run_name}" ]; then
         if [ "${TRAIN_MODE}" = "1stage" ]; then
-            resolved_run_name="1stage_rna_template"
+            resolved_run_name="1stage_rna_finetune"
+            [ "$(as_bool "${USE_RIBONANZA}")" = "true" ] && resolved_run_name="${resolved_run_name}_rnet2"
             [ "$(as_bool "${USE_RNALM}")" = "true" ] && resolved_run_name="${resolved_run_name}_llm_${INJECTION_MODE}"
+            [ "$(as_bool "${USE_RNA_MSA}")" = "true" ] && resolved_run_name="${resolved_run_name}_rna_msa"
+            [ "$(as_bool "${USE_RNA_TEMPLATE}")" = "true" ] && resolved_run_name="${resolved_run_name}_rna_template"
             resolved_run_name="${resolved_run_name}_alr${ADAPTER_LR}_blr${BACKBONE_LR}"
         else
-            resolved_run_name="2stage_rna_template"
+            resolved_run_name="2stage_rna_finetune"
+            [ "$(as_bool "${USE_RIBONANZA}")" = "true" ] && resolved_run_name="${resolved_run_name}_rnet2"
             [ "$(as_bool "${USE_RNALM}")" = "true" ] && resolved_run_name="${resolved_run_name}_llm_${INJECTION_MODE}"
+            [ "$(as_bool "${USE_RNA_MSA}")" = "true" ] && resolved_run_name="${resolved_run_name}_rna_msa"
+            [ "$(as_bool "${USE_RNA_TEMPLATE}")" = "true" ] && resolved_run_name="${resolved_run_name}_rna_template"
             resolved_run_name="${resolved_run_name}_s1a${STAGE1_ADAPTER_LR}_s1b${STAGE1_BACKBONE_LR}"
         fi
         [ "${GATE_MODE}" != "none" ] && resolved_run_name="${resolved_run_name}_gate_${GATE_MODE}"
@@ -202,9 +231,9 @@ build_common_args() {
     if [ -n "${PROJECT_NAME}" ]; then
         PROJECT_NAME_RESOLVED="${PROJECT_NAME}"
     elif [ "${TRAIN_MODE}" = "1stage" ]; then
-        PROJECT_NAME_RESOLVED="protenix_rna_template_1stage"
+        PROJECT_NAME_RESOLVED="protenix_rna_finetune_1stage"
     else
-        PROJECT_NAME_RESOLVED="protenix_rna_template_2stage"
+        PROJECT_NAME_RESOLVED="protenix_rna_finetune_2stage"
     fi
 
     OUTPUT_DIR="${PROTENIX_DIR}/output/${RUN_NAME_RESOLVED}"
@@ -301,12 +330,18 @@ print_summary() {
     echo "  Protenix Unified Train Pipeline"
     echo "  config:             ${CONFIG_PATH}"
     echo "  train_mode:         ${TRAIN_MODE}"
+    echo "  use_ribonanza:      ${USE_RIBONANZA}"
     echo "  use_rnalm:          ${USE_RNALM}"
     echo "  use_rna_template:   ${USE_RNA_TEMPLATE}"
     echo "  use_rna_msa:        ${USE_RNA_MSA}"
     echo "  use_rna_loss:       ${RNA_LOSS_ENABLE}"
     echo "  injection_mode:     ${INJECTION_MODE}"
     echo "  gate_mode:          ${GATE_MODE}"
+    if [ "$(as_bool "${USE_RIBONANZA}")" = "true" ]; then
+        echo "  rnet_model_dir:     ${RIBONANZA_MODEL_DIR}"
+        echo "  rnet_gate_type:     ${RIBONANZA_GATE_TYPE}"
+        echo "  rnet_pf_blocks:     ${RIBONANZA_N_PAIRFORMER_BLOCKS}"
+    fi
     echo "  rna_projector_init: ${RNA_PROJECTOR_INIT}"
     echo "  rna_template_alpha: ${RNA_TEMPLATE_ALPHA}"
     echo "  template_n_blocks:  ${TEMPLATE_N_BLOCKS}"
@@ -338,6 +373,7 @@ main() {
 
     build_rnalm_args
     build_rna_template_args
+    build_ribonanza_args
     build_common_args
     build_stage_args
     build_data_args
@@ -350,6 +386,7 @@ main() {
         "${COMMON_ARGS[@]}"
         "${STAGE_ARGS[@]}"
         "${RNALM_ARGS[@]}"
+        "${RIBONANZA_ARGS[@]}"
         "${RNA_TEMPLATE_ARGS[@]}"
         "${DATA_ARGS[@]}"
     )

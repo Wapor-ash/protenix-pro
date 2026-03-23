@@ -29,9 +29,14 @@ from protenix.data.inference.json_to_feature import SampleDictToFeatures
 from protenix.data.rna_template.rna_template_featurizer import RNATemplateFeaturizer
 from protenix.data.rnalm.rnalm_featurizer import RiNALMoFeaturizer
 from protenix.data.msa.msa_featurizer import InferenceMSAFeaturizer
+from protenix.data.ss.ss_featurizer import SSFeaturizer
 from protenix.data.template.template_featurizer import InferenceTemplateFeaturizer
 from protenix.data.template.template_utils import TemplateHitFeaturizer
-from protenix.data.utils import data_type_transform, make_dummy_feature
+from protenix.data.utils import (
+    data_type_transform,
+    make_dummy_feature,
+    make_msa_placeholder_features,
+)
 from protenix.utils.distributed import DIST_WRAPPER
 from protenix.utils.torch_utils import collate_fn_identity, dict_to_tensor
 
@@ -257,6 +262,27 @@ class InferenceDataset(Dataset):
             logger.info("RibonanzaNet2 tokenizer enabled for inference.")
         # === End RibonanzaNet2 Tokenizer ===
 
+        # === RNA Secondary Structure (BPP) Featurizer ===
+        ss_info = configs.get("secondary_structure", {})
+        self.ss_featurizer = None
+        if ss_info.get("enable", False):
+            self.ss_featurizer = SSFeaturizer(
+                bpp_dir=ss_info.get("bpp_dir", ""),
+                index_path=ss_info.get("index_path", ""),
+                n_pair_channels=ss_info.get("n_pair_channels", 4),
+                n_single_channels=ss_info.get("n_single_channels", 3),
+                boundary_margin=ss_info.get("boundary_margin", 10),
+            )
+            logger.info(
+                "SS featurizer enabled for inference: "
+                f"bpp_dir={ss_info.get('bpp_dir', '')}, "
+                f"index_path={ss_info.get('index_path', '')}, "
+                f"n_pair_ch={ss_info.get('n_pair_channels', 4)}, "
+                f"n_single_ch={ss_info.get('n_single_channels', 3)}, "
+                f"boundary_margin={ss_info.get('boundary_margin', 10)}"
+            )
+        # === End RNA Secondary Structure ===
+
     def process_one(
         self,
         single_sample_dict: Mapping[str, Any],
@@ -362,7 +388,24 @@ class InferenceDataset(Dataset):
             features_dict.update(ribo_result)
         # === End RibonanzaNet2 Tokenizer ===
 
-        # Make dummy features for not implemented features
+        # === RNA Secondary Structure (BPP) Features ===
+        if self.ss_featurizer is not None:
+            ss_result = self.ss_featurizer(
+                token_array=token_array,
+                atom_array=atom_array,
+                bioassembly_dict={
+                    "name": single_sample_dict.get("name", "unknown"),
+                    "sequences": sample2feat.entity_to_sequences,
+                },
+                inference_mode=True,
+            )
+            features_dict.update(ss_result)
+        # === End RNA Secondary Structure ===
+
+        # MSA semantics:
+        # - use_msa=True but no usable MSA was found -> create full dummy MSA.
+        # - use_msa=False -> skip msa stack entirely, but keep neutral
+        #   profile/deletion_mean placeholders for InputFeatureEmbedder.
         dummy_feats = []
         if len(template_features) == 0:
             dummy_feats.append("template")
@@ -370,7 +413,13 @@ class InferenceDataset(Dataset):
             template_features = dict_to_tensor(template_features)
             features_dict.update(template_features)
         if len(msa_features) == 0:
-            dummy_feats.append("msa")
+            if self.use_msa:
+                dummy_feats.append("msa")
+            else:
+                features_dict = make_msa_placeholder_features(
+                    features_dict=features_dict,
+                    include_msa_stack=False,
+                )
         else:
             msa_features = dict_to_tensor(msa_features)
             features_dict.update(msa_features)
@@ -389,7 +438,7 @@ class InferenceDataset(Dataset):
         # Add dimension related items
         N_token = feat["token_index"].shape[0]
         N_atom = feat["atom_to_token_idx"].shape[0]
-        N_msa = feat["msa"].shape[0]
+        N_msa = feat["msa"].shape[0] if "msa" in feat else 0
         stats = {}
         for mol_type in ["ligand", "protein", "dna", "rna"]:
             mol_type_mask = feat[f"is_{mol_type}"].bool()

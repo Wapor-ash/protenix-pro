@@ -908,23 +908,10 @@ def make_dummy_feature(
             cur_feat_shape = feat_shape[feat_name]
             features_dict[feat_name] = torch.zeros(cur_feat_shape)
     if "msa" in dummy_feats:
-        # features_dict["msa"] = features_dict["restype"].unsqueeze(0)
-        features_dict["msa"] = torch.nonzero(features_dict["restype"])[:, 1].unsqueeze(
-            0
+        features_dict = make_msa_placeholder_features(
+            features_dict=features_dict,
+            include_msa_stack=True,
         )
-        assert features_dict["msa"].shape == feat_shape["msa"]
-        features_dict["has_deletion"] = torch.zeros(feat_shape["has_deletion"])
-        features_dict["deletion_value"] = torch.zeros(feat_shape["deletion_value"])
-        features_dict["profile"] = features_dict["restype"].clone()
-        assert features_dict["profile"].shape == feat_shape["profile"]
-        features_dict["deletion_mean"] = torch.zeros(feat_shape["deletion_mean"])
-        for key in [
-            "prot_pair_num_alignments",
-            "prot_unpair_num_alignments",
-            "rna_pair_num_alignments",
-            "rna_unpair_num_alignments",
-        ]:
-            features_dict[key] = torch.tensor(0, dtype=torch.int32)
 
     if "template" in dummy_feats:
         features_dict["template_restype"] = (
@@ -936,8 +923,55 @@ def make_dummy_feature(
         features_dict["template_all_atom_positions"] = torch.zeros(
             feat_shape["template_all_atom_positions"]
         )
-    if features_dict["msa"].dim() < 2:
+    if "msa" in features_dict and features_dict["msa"].dim() < 2:
         raise ValueError(f"msa must be 2D, get shape: {features_dict['msa'].shape}")
+    return features_dict
+
+
+def make_msa_placeholder_features(
+    features_dict: Mapping[str, torch.Tensor],
+    include_msa_stack: bool = True,
+) -> dict[str, torch.Tensor]:
+    """Create neutral MSA-derived features.
+
+    Two modes are supported:
+
+    - ``include_msa_stack=True``: create a query-only dummy MSA stack so the
+      MSA module still executes.
+    - ``include_msa_stack=False``: only create input-side placeholder features
+      required by ``InputFeatureEmbedder`` while omitting the actual MSA stack,
+      so ``MSAModule`` is skipped by key absence.
+    """
+
+    num_token = features_dict["token_index"].shape[0]
+    num_atom = features_dict["atom_to_token_idx"].shape[0]
+    feat_shape, _ = get_data_shape_dict(
+        num_token=num_token,
+        num_atom=num_atom,
+        num_msa=1,
+        num_templ=4,
+        num_pocket=30,
+    )
+
+    if include_msa_stack:
+        features_dict["msa"] = torch.nonzero(features_dict["restype"])[:, 1].unsqueeze(
+            0
+        )
+        assert features_dict["msa"].shape == feat_shape["msa"]
+        features_dict["has_deletion"] = torch.zeros(feat_shape["has_deletion"])
+        features_dict["deletion_value"] = torch.zeros(feat_shape["deletion_value"])
+
+    features_dict["profile"] = features_dict["restype"].clone()
+    assert features_dict["profile"].shape == feat_shape["profile"]
+    features_dict["deletion_mean"] = torch.zeros(feat_shape["deletion_mean"])
+    for key in [
+        "prot_pair_num_alignments",
+        "prot_unpair_num_alignments",
+        "rna_pair_num_alignments",
+        "rna_unpair_num_alignments",
+    ]:
+        features_dict[key] = torch.tensor(0, dtype=torch.int32)
+
     return features_dict
 
 

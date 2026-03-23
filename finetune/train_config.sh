@@ -35,7 +35,7 @@ CONDA_ENV="protenix"
 PROJECT_ROOT="/inspire/ssd/project/sais-bio/public/ash_proj"
 
 # PROTENIX_DIR choices: absolute path to the Protenix repo root
-PROTENIX_DIR="${PROJECT_ROOT}/code/protenix_new/Protenix"
+PROTENIX_DIR="${PROJECT_ROOT}/code/protenix_pro/Protenix"
 
 # DATA_DIR choices: absolute path to the RNA finetune dataset root
 DATA_DIR="${PROJECT_ROOT}/data/stanford-rna-3d-folding/part2"
@@ -209,6 +209,20 @@ STAGE2_WARMUP_STEPS="100"
 # STAGE2_EMA_DECAY choices: float in (0, 1)
 STAGE2_EMA_DECAY="0.999"
 
+
+# ===================== RibonanzaNet2 Params =====================
+# USE_RIBONANZA choices: "true" | "false"
+USE_RIBONANZA="true"
+
+# RIBONANZA_MODEL_DIR choices: absolute path to directory containing
+#   pairwise.yaml and pytorch_model_fsdp.bin
+RIBONANZA_MODEL_DIR="${PROJECT_ROOT}/data/ribonanzanet2/model_weights"
+
+# RIBONANZA_GATE_TYPE choices: "channel" | "scalar"
+RIBONANZA_GATE_TYPE="channel"
+
+# RIBONANZA_N_PAIRFORMER_BLOCKS choices: positive integer
+RIBONANZA_N_PAIRFORMER_BLOCKS="4"
 
 # ===================== RNA / DNA LLM Params =====================
 # USE_RNALM choices: "true" | "false"

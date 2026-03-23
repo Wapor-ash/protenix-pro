@@ -44,6 +44,7 @@ class InputFeatureEmbedder(nn.Module):
         c_token: int = 384,
         esm_configs: dict[str, Any] = {},
         rnalm_configs: dict[str, Any] = {},
+        ss_configs: dict[str, Any] = {},
     ) -> None:
         super(InputFeatureEmbedder, self).__init__()
         self.c_atom = c_atom
@@ -116,6 +117,20 @@ class InputFeatureEmbedder(nn.Module):
                 )
         # === End RNA LLM Input Injection ===
 
+        # === SS (Secondary Structure) Single Adapter ===
+        # Projects per-token SS summary features (p_out, p_in, p_unp) to c_s_inputs
+        # and adds to s_inputs, like ESM injection. Zero-initialized.
+        self.ss_single_enable = ss_configs.get("enable", False)
+        if self.ss_single_enable:
+            ss_n_single = ss_configs.get("n_single_channels", 3)
+            c_s_inputs = self.c_token + 32 + 32 + 1  # 449
+            self.ss_single_adapter = LinearNoBias(ss_n_single, c_s_inputs)
+            nn.init.zeros_(self.ss_single_adapter.weight)
+            logger.info(
+                f"SS single adapter enabled: {ss_n_single} -> {c_s_inputs}, zero-init"
+            )
+        # === End SS Single Adapter ===
+
         # Line2
         self.input_feature = {"restype": 32, "profile": 32, "deletion_mean": 1}
 
@@ -168,6 +183,12 @@ class InputFeatureEmbedder(nn.Module):
             # Add esm embedding to s_inputs if enable.
             esm_embeddings = self.linear_esm(input_feature_dict["esm_token_embedding"])
             s_inputs = s_inputs + esm_embeddings
+
+        # === SS Single Adapter Injection ===
+        if self.ss_single_enable and "ss_single_feat" in input_feature_dict:
+            ss_single = input_feature_dict["ss_single_feat"]
+            s_inputs = s_inputs + self.ss_single_adapter(ss_single)
+        # === End SS Single Adapter ===
 
         # === RNA LLM Input Injection (like ESM — fail-fast if missing) ===
         if self.rnalm_input_enable:
@@ -333,6 +354,54 @@ class FourierEmbedding(nn.Module):
         return torch.cos(
             input=2 * torch.pi * (t_hat_noise_level.unsqueeze(dim=-1) * self.w + self.b)
         )
+
+
+class SSPairEmbedder(nn.Module):
+    """Embeds crop-aware BPP pair features into pairwise representation space.
+
+    Takes [N_token, N_token, n_channels] (default 4: P_in, 1-P_in, O_ij, B_ij)
+    and produces [N_token, N_token, c_z] via a small MLP.
+
+    All weights are zero-initialized so the module has no effect at initialization,
+    preserving the original model behavior until trained.
+
+    Args:
+        n_channels: Number of input pair channels (default 4).
+        c_z: Output pairwise embedding dimension (default 128).
+        hidden_dim: Hidden dimension for MLP (default 32).
+        n_layers: Number of MLP layers (default 2).
+    """
+
+    def __init__(
+        self,
+        n_channels: int = 4,
+        c_z: int = 128,
+        hidden_dim: int = 32,
+        n_layers: int = 2,
+    ) -> None:
+        super().__init__()
+        layers = []
+        layers.append(LinearNoBias(n_channels, hidden_dim))
+        layers.append(nn.ReLU())
+        for _ in range(n_layers - 2):
+            layers.append(LinearNoBias(hidden_dim, hidden_dim))
+            layers.append(nn.ReLU())
+        layers.append(LinearNoBias(hidden_dim, c_z))
+        self.network = nn.Sequential(*layers)
+
+        # Zero-initialize all linear layers so output is zero at init
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.zeros_(module.weight)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: [N_token, N_token, n_channels] pair features
+        Returns:
+            [N_token, N_token, c_z] pairwise embeddings
+        """
+        return self.network(x)
 
 
 class SubstructureEmbedder(nn.Module):

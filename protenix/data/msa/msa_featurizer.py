@@ -400,23 +400,35 @@ class MSAFeaturizer:
     ) -> None:
         self.dataset_name = dataset_name
         super().__init__()
+
+        prot_mappings = (
+            {
+                i: load_json_cached(p)
+                for i, p in enumerate(prot_seq_or_filename_to_msadir_jsons)
+            }
+            if enable_prot_msa
+            else {}
+        )
+        rna_mappings = (
+            {
+                i: load_json_cached(p)
+                for i, p in enumerate(rna_seq_or_filename_to_msadir_jsons)
+            }
+            if enable_rna_msa
+            else {}
+        )
+
         # Initialize source managers for protein and RNA
         self.prot_mgr = MSASourceManager(
             prot_msadir_raw_paths,
             prot_indexing_methods,
-            {
-                i: load_json_cached(p)
-                for i, p in enumerate(prot_seq_or_filename_to_msadir_jsons)
-            },
+            prot_mappings,
             enable_prot_msa,
         )
         self.rna_mgr = MSASourceManager(
             rna_msadir_raw_paths,
             rna_indexing_methods,
-            {
-                i: load_json_cached(p)
-                for i, p in enumerate(rna_seq_or_filename_to_msadir_jsons)
-            },
+            rna_mappings,
             enable_rna_msa,
         )
         self.prot_p_dbs = prot_pairing_dbs

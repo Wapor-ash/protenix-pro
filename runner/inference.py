@@ -173,14 +173,25 @@ class InferenceRunner(object):
             state_dict=checkpoint["model"],
             strict=self.configs.load_strict,
         )
+        ckpt_keys = set(checkpoint["model"].keys())
+
+        rna_template_repair_result = "skipped"
+        rna_template_configs = self.configs.get("rna_template", {})
+        if rna_template_configs.get("enable", False):
+            rna_template_repair_result = self.model.reinit_rna_projector_from_protein(
+                checkpoint_keys=ckpt_keys
+            )
+            self.print(
+                f"RNA projector init after checkpoint load: {rna_template_repair_result}"
+            )
+
         self.model.eval()
         self.print("Finish loading checkpoint.")
 
         # === Inference projector validation ===
         # If any projector-based feature (rnalm, rna_llm, dna_llm, rna_template)
-        # is enabled, the corresponding projector weights MUST exist in the
-        # checkpoint. Inference should never silently use uninitialized projectors.
-        ckpt_keys = set(checkpoint["model"].keys())
+        # is enabled, the corresponding projector weights or a deterministic
+        # post-load repair path must be available.
 
         rnalm_configs = self.configs.get("rnalm", {})
         if rnalm_configs.get("enable", False):
@@ -203,19 +214,26 @@ class InferenceRunner(object):
                     f"RNA/DNA LM weights found in checkpoint: {rnalm_keys_in_ckpt}"
                 )
 
-        rna_template_configs = self.configs.get("rna_template", {})
         if rna_template_configs.get("enable", False):
             rna_tpl_keys_in_ckpt = [
                 k for k in ckpt_keys
                 if "linear_no_bias_a_rna" in k or "rna_template_alpha" in k
             ]
             if not rna_tpl_keys_in_ckpt:
-                raise RuntimeError(
-                    "rna_template.enable=True but checkpoint contains NO RNA template projector weights "
-                    "(linear_no_bias_a_rna). Inference requires a finetuned checkpoint that was trained "
-                    "with rna_template.enable=True. Either load a proper checkpoint or set "
-                    "rna_template.enable=false."
-                )
+                if rna_template_repair_result in {
+                    "copied_from_protein",
+                    "zero_initialized",
+                }:
+                    self.print(
+                        "RNA template weights were absent in checkpoint; "
+                        f"initialized via {rna_template_repair_result}."
+                    )
+                else:
+                    raise RuntimeError(
+                        "rna_template.enable=True but checkpoint contains NO RNA template projector "
+                        "weights and no valid post-load repair was applied. Either load a finetuned "
+                        "checkpoint with RNA template weights or set rna_template.enable=false."
+                    )
             else:
                 self.print(
                     f"RNA template weights found in checkpoint: {rna_tpl_keys_in_ckpt}"

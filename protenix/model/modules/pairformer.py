@@ -922,16 +922,15 @@ class MSAModule(nn.Module):
 
 class TemplateEmbedder(nn.Module):
     """
-    Implements Algorithm 16 in AF3, refactored to match RNAPro's integration pattern.
+    Implements Algorithm 16 in AF3 with checkpoint-compatible template trunk.
 
-    Integration follows RNAPro:
-    - s_inputs outer product for pair initialization
-    - Trunk s and z passed into dedicated PairformerStack (c_s=c_s, c_z=c_z)
-    - Per-template: z_pair = z_init_outer + z + feature_proj → pairformer → layernorm
-    - Accumulate, average, then zero-init final_linear → output
-    - Feature computation (108-dim) is preserved from Protenix (full-atom, not C1'-only)
+    Protein templates keep the original Protenix-v1 bridge structure:
+    feature_proj (108 -> c), layernorm(z), z bridge (c_z -> c),
+    shared template PairformerStack at c, then project back to c_z.
 
-    Supports both protein and RNA templates with separate projectors.
+    RNA templates follow the same architecture and only swap the input
+    projector to ``linear_no_bias_a_rna`` so protein checkpoint weights can be
+    copied into the RNA branch after load.
     """
 
     def __init__(
@@ -972,42 +971,29 @@ class TemplateEmbedder(nn.Module):
             + sum(self.input_feature2.values())
         )
 
-        # === RNAPro-style integration layers ===
-        # s_inputs outer product for pair initialization
-        self.linear_no_bias_s1 = LinearNoBias(
-            in_features=self.c_s_inputs, out_features=self.c_z
+        # Checkpoint-compatible Protenix-v1 template trunk:
+        # z[c_z] -> c, feature[108] -> c, PairformerStack(c_s=0, c_z=c), then c -> c_z.
+        self.linear_no_bias_z = LinearNoBias(
+            in_features=self.c_z, out_features=self.c
         )
-        self.linear_no_bias_s2 = LinearNoBias(
-            in_features=self.c_s_inputs, out_features=self.c_z
-        )
-        # s LayerNorm for single representation input to pairformer
-        self.input_s_ln = LayerNorm(self.c_s)
-
-        # Feature projector: 108-dim template features → c_z
+        self.layernorm_z = LayerNorm(self.c_z)
         self.linear_no_bias_a = LinearNoBias(
-            in_features=feat_dim, out_features=self.c_z
+            in_features=feat_dim, out_features=self.c
         )
-
-        # Dedicated PairformerStack (RNAPro style: c_s, c_z at full trunk dims)
         self.pairformer_stack = PairformerStack(
-            c_s=self.c_s,
-            c_z=self.c_z,
+            c_s=0,
+            c_z=self.c,
             n_blocks=self.n_blocks,
             num_intermediate_factor=num_intermediate_factor,
             dropout=dropout,
             blocks_per_ckpt=blocks_per_ckpt,
             hidden_scale_up=hidden_scale_up,
         )
-
-        # LayerNorm after pairformer per template
-        self.layernorm_z = LayerNorm(self.c_z)
-
-        # Zero-init final linear (RNAPro style: outputs zeros initially)
-        self.final_linear_no_bias = LinearNoBias(
-            in_features=self.c_z, out_features=self.c_z
+        self.layernorm_v = LayerNorm(self.c)
+        self.relu = nn.ReLU()
+        self.linear_no_bias_u = LinearNoBias(
+            in_features=self.c, out_features=self.c_z
         )
-        with torch.no_grad():
-            nn.init.zeros_(self.final_linear_no_bias.weight)
 
         # === RNA Template: separate projector for RNA template features ===
         rna_cfg = rna_template_configs or {}
@@ -1016,7 +1002,7 @@ class TemplateEmbedder(nn.Module):
         if self.rna_template_enable:
             self.linear_no_bias_a_rna = LinearNoBias(
                 in_features=feat_dim,
-                out_features=self.c_z,
+                out_features=self.c,
             )
             if self.rna_projector_init == "zero":
                 nn.init.zeros_(self.linear_no_bias_a_rna.weight)
@@ -1042,12 +1028,12 @@ class TemplateEmbedder(nn.Module):
         chunk_size: Optional[int] = None,
     ) -> torch.Tensor:
         """
-        RNAPro-style template forward: s_inputs outer product init + z + features.
+        Checkpoint-compatible template forward with dual protein/RNA projectors.
 
         Args:
             input_feature_dict: input feature dict with template features
-            s_inputs: single input features [..., N_token, c_s_inputs=449]
-            s: trunk single representation [..., N_token, c_s=384]
+            s_inputs: unused, kept for call-site compatibility
+            s: unused, kept for call-site compatibility
             z: pair embedding [..., N_token, N_token, c_z=128]
             pair_mask: pair masking [..., N_token, N_token]
 
@@ -1069,14 +1055,8 @@ class TemplateEmbedder(nn.Module):
         if pair_mask is None:
             pair_mask = z.new_ones(z.shape[:-1])
 
-        # RNAPro-style: s_inputs outer product for pair initialization (computed once)
-        z_init_outer = (
-            self.linear_no_bias_s1(s_inputs)[..., None, :, :]
-            + self.linear_no_bias_s2(s_inputs)[..., None, :]
-        )  # [..., N_token, N_token, c_z]
-
-        # Prepare single representation for pairformer
-        s_template = self.input_s_ln(torch.clamp(s, min=-512, max=512))
+        z = self.layernorm_z(z)
+        query_num_channels = z.shape[-1]
 
         u = 0
         total_templates = 0
@@ -1088,9 +1068,7 @@ class TemplateEmbedder(nn.Module):
                 u = u + self._single_template_forward(
                     template_id=template_id,
                     input_feature_dict=input_feature_dict,
-                    z_init_outer=z_init_outer,
                     z=z,
-                    s=s_template,
                     pair_mask=pair_mask,
                     multichain_mask=multichain_mask,
                     projector=self.linear_no_bias_a,
@@ -1111,9 +1089,7 @@ class TemplateEmbedder(nn.Module):
                 rna_v = self._single_template_forward(
                     template_id=template_id,
                     input_feature_dict=input_feature_dict,
-                    z_init_outer=z_init_outer,
                     z=z,
-                    s=s_template,
                     pair_mask=pair_mask,
                     multichain_mask=multichain_mask,
                     projector=rna_projector,
@@ -1133,18 +1109,16 @@ class TemplateEmbedder(nn.Module):
         if total_templates == 0:
             return 0
 
-        # RNAPro-style: average then zero-init final linear
-        u = u / max(total_templates, 1)
-        u = self.final_linear_no_bias(u)
+        u = u / (1e-7 + total_templates)
+        u = self.linear_no_bias_u(self.relu(u))
+        assert u.shape[-1] == query_num_channels
         return u
 
     def _single_template_forward(
         self,
         template_id: int,
         input_feature_dict: dict[str, Any],
-        z_init_outer: torch.Tensor,
         z: torch.Tensor,
-        s: torch.Tensor,
         pair_mask: Optional[torch.Tensor],
         multichain_mask: Optional[torch.Tensor],
         projector: LinearNoBias,
@@ -1157,8 +1131,10 @@ class TemplateEmbedder(nn.Module):
     ) -> torch.Tensor:
         """Unified template forward for both protein and RNA templates.
 
-        Uses 108-dim Protenix features but RNAPro-style integration:
-        z_pair = z_init_outer + z + projector(features) → pairformer(s, z_pair) → layernorm
+        Protein and RNA branches share the checkpoint-compatible template trunk:
+        v = linear_no_bias_z(layernorm_z(z)) + projector(features)
+          -> pairformer_stack(c_s=0, c_z=c)
+          -> layernorm_v
 
         Args:
             prefix: "" for protein templates, "rna_" for RNA templates
@@ -1167,7 +1143,7 @@ class TemplateEmbedder(nn.Module):
         # Build effective mask
         effective_mask = multichain_mask
         if rna_block_mask is not None:
-            effective_mask = effective_mask * rna_block_mask
+            effective_mask = effective_mask * rna_block_mask.to(multichain_mask.dtype)
 
         to_concat = []
 
@@ -1201,19 +1177,15 @@ class TemplateEmbedder(nn.Module):
         to_concat.append(backbone_mask_2d.unsqueeze(-1))
 
         at = torch.concat(to_concat, dim=-1)  # [..., N_token, N_token, 108]
-
-        # RNAPro-style: z_pair = z_init_outer + z + feature_projection
-        z_pair = z_init_outer + z + projector(at)
-
-        # Process through dedicated PairformerStack
-        _, z_pair = self.pairformer_stack(
-            s=s,
-            z=z_pair,
+        v = self.linear_no_bias_z(z) + projector(at)
+        _, v = self.pairformer_stack(
+            s=None,
+            z=v,
             pair_mask=pair_mask,
             triangle_multiplicative=triangle_multiplicative,
             triangle_attention=triangle_attention,
             inplace_safe=inplace_safe,
             chunk_size=chunk_size,
         )
-        z_pair = self.layernorm_z(z_pair)
-        return z_pair
+        v = self.layernorm_v(v)
+        return v

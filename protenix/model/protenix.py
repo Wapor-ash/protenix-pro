@@ -35,6 +35,7 @@ from protenix.model.modules.embedders import (
     ConstraintEmbedder,
     InputFeatureEmbedder,
     RelativePositionEncoding,
+    SSPairEmbedder,
 )
 from protenix.model.modules.head import DistogramHead
 from protenix.model.modules.pairformer import (
@@ -125,10 +126,12 @@ class Protenix(nn.Module):
         # Model
         esm_configs = configs.get("esm", {})  # This is used in InputFeatureEmbedder
         rnalm_configs_for_embedder = configs.get("rnalm", {})
+        ss_configs_for_embedder = configs.get("secondary_structure", {})
         self.input_embedder = InputFeatureEmbedder(
             **configs.model.input_embedder,
             esm_configs=esm_configs,
             rnalm_configs=rnalm_configs_for_embedder,
+            ss_configs=ss_configs_for_embedder,
         )
         self.relative_position_encoding = RelativePositionEncoding(
             **configs.model.relative_position_encoding
@@ -148,6 +151,24 @@ class Protenix(nn.Module):
         self.constraint_embedder = ConstraintEmbedder(
             **configs.model.constraint_embedder
         )
+
+        # === Secondary Structure Pair Embedder ===
+        ss_configs = configs.get("secondary_structure", {})
+        self.ss_enable = ss_configs.get("enable", False)
+        if self.ss_enable:
+            self.ss_pair_embedder = SSPairEmbedder(
+                n_channels=ss_configs.get("n_pair_channels", 4),
+                c_z=configs.c_z,
+                hidden_dim=ss_configs.get("pair_hidden_dim", 32),
+                n_layers=ss_configs.get("pair_n_layers", 2),
+            )
+            logger.info(
+                f"SS pair embedder enabled: {ss_configs.get('n_pair_channels', 4)} -> {configs.c_z}, "
+                f"hidden_dim={ss_configs.get('pair_hidden_dim', 32)}, "
+                f"n_layers={ss_configs.get('pair_n_layers', 2)}, zero-init"
+            )
+        # === End Secondary Structure ===
+
         self.pairformer_stack = PairformerStack(**configs.model.pairformer)
 
         # === RNA LM (RiNALMo) Embedding Integration ===
@@ -506,6 +527,12 @@ class Protenix(nn.Module):
         if self.rnet2_enable and _rnet2_pairwise_features is not None:
             z_init = self.gated_pairwise_feature_injector(z_init, _rnet2_pairwise_features)
         # === End RibonanzaNet2 pairwise injection ===
+
+        # === Secondary Structure: inject BPP pair features into z_init ===
+        if self.ss_enable and "ss_pair_feat" in input_feature_dict:
+            z_ss = self.ss_pair_embedder(input_feature_dict["ss_pair_feat"])
+            z_init = z_init + z_ss
+        # === End Secondary Structure pair injection ===
 
         # Line 6
         z = torch.zeros_like(z_init)

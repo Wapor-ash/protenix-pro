@@ -34,12 +34,14 @@ from protenix.data.msa.msa_featurizer import MSAFeaturizer
 from protenix.data.pipeline.data_pipeline import DataPipeline
 from protenix.data.esm.esm_featurizer import ESMFeaturizer
 from protenix.data.rnalm.rnalm_featurizer import RiNALMoFeaturizer
+from protenix.data.ss.ss_featurizer import SSFeaturizer
 from protenix.data.template.template_featurizer import TemplateFeaturizer
 from protenix.data.tokenizer import TokenArray
 from protenix.data.utils import (
     data_type_transform,
     get_antibody_clusters,
     make_dummy_feature,
+    make_msa_placeholder_features,
 )
 from protenix.utils.cropping import CropData
 from protenix.utils.file_io import read_indices_csv
@@ -136,6 +138,10 @@ class BaseSingleDataset(Dataset):
 
         # === RibonanzaNet2 Tokenizer ===
         self.ribonanza_tokenizer = kwargs.get("ribonanza_tokenizer", None)
+
+        # === Secondary Structure (BPP) Featurizer ===
+        self.ss_featurizer = kwargs.get("ss_featurizer", None)
+        self.ss_dropout = kwargs.get("ss_dropout", 0.0)
 
         # Read data
         self.indices_list = self.read_indices_list(indices_fpath)
@@ -588,6 +594,22 @@ class BaseSingleDataset(Dataset):
             feat.update(ribo_result)
         # === End RibonanzaNet2 Tokenizer ===
 
+        # === Secondary Structure (BPP) Features ===
+        if self.ss_featurizer is not None:
+            ss_result = self.ss_featurizer(
+                token_array=cropped_token_array,
+                atom_array=cropped_atom_array,
+                bioassembly_dict=bioassembly_dict,
+                inference_mode=False,
+            )
+            # Apply SS dropout during training: zero out all SS features with probability ss_dropout
+            if self.ss_dropout > 0.0 and random.random() < self.ss_dropout:
+                # Zero out — model sees no SS info for this sample
+                for key in ss_result:
+                    ss_result[key] = torch.zeros_like(ss_result[key])
+            feat.update(ss_result)
+        # === End Secondary Structure ===
+
         # Basic info, e.g. dimension related items
         basic_info = {
             "pdb_id": (
@@ -598,12 +620,20 @@ class BaseSingleDataset(Dataset):
             "N_asym": torch.tensor([len(torch.unique(feat["asym_id"]))]),
             "N_token": torch.tensor([feat["token_index"].shape[0]]),
             "N_atom": torch.tensor([feat["atom_to_token_idx"].shape[0]]),
-            "N_msa": torch.tensor([feat["msa"].shape[0]]),
+            "N_msa": torch.tensor([feat["msa"].shape[0] if "msa" in feat else 0]),
             "bioassembly_dict_fpath": bioassembly_dict_fpath,
-            "N_msa_prot_pair": torch.tensor([feat["prot_pair_num_alignments"]]),
-            "N_msa_prot_unpair": torch.tensor([feat["prot_unpair_num_alignments"]]),
-            "N_msa_rna_pair": torch.tensor([feat["rna_pair_num_alignments"]]),
-            "N_msa_rna_unpair": torch.tensor([feat["rna_unpair_num_alignments"]]),
+            "N_msa_prot_pair": torch.tensor(
+                [int(feat.get("prot_pair_num_alignments", 0))]
+            ),
+            "N_msa_prot_unpair": torch.tensor(
+                [int(feat.get("prot_unpair_num_alignments", 0))]
+            ),
+            "N_msa_rna_pair": torch.tensor(
+                [int(feat.get("rna_pair_num_alignments", 0))]
+            ),
+            "N_msa_rna_unpair": torch.tensor(
+                [int(feat.get("rna_unpair_num_alignments", 0))]
+            ),
         }
 
         for mol_type in ("protein", "ligand", "rna", "dna"):
@@ -905,10 +935,19 @@ class BaseSingleDataset(Dataset):
             labels_dict["chain_1_mask"] = chain_1_mask  # [N_eval, N_atom]
             labels_dict["chain_2_mask"] = chain_2_mask  # [N_eval, N_atom]
 
-        # Make dummy features for not implemented features
+        # MSA semantics:
+        # - featurizer exists but sample has no MSA -> create full dummy MSA.
+        # - featurizer disabled by config -> skip msa stack entirely, but keep
+        #   neutral input-side placeholders for InputFeatureEmbedder.
         dummy_feats = []
         if len(msa_features) == 0:
-            dummy_feats.append("msa")
+            if self.msa_featurizer is None:
+                features_dict = make_msa_placeholder_features(
+                    features_dict=features_dict,
+                    include_msa_stack=False,
+                )
+            else:
+                dummy_feats.append("msa")
         else:
             msa_features = dict_to_tensor(msa_features)
             features_dict.update(msa_features)
@@ -951,6 +990,12 @@ def get_msa_featurizer(configs, dataset_name: str, stage: str) -> Optional[Calla
     if "msa" in (dataset_config := configs["data"][dataset_name]):
         for k, v in dataset_config["msa"].items():
             msa_args[k] = v
+    if not msa_args.enable_prot_msa and not msa_args.enable_rna_msa:
+        logger.info(
+            f"MSA featurizer disabled for dataset={dataset_name}: "
+            "enable_prot_msa=false and enable_rna_msa=false"
+        )
+        return None
     return MSAFeaturizer(
         dataset_name=msa_args.dataset_name,
         prot_seq_or_filename_to_msadir_jsons=msa_args.prot_seq_or_filename_to_msadir_jsons,
@@ -1192,6 +1237,45 @@ def get_ribonanza_tokenizer(configs):
     logger.info("RibonanzaNet2 tokenizer enabled for training.")
     return RibonanzaTokenizer()
 # === End RibonanzaNet2 Tokenizer ===
+
+
+# === Secondary Structure (BPP) Featurizer ===
+def get_ss_featurizer(configs) -> Optional[SSFeaturizer]:
+    """Create an SSFeaturizer if secondary_structure is enabled.
+
+    Args:
+        configs: Configuration dict with secondary_structure section.
+
+    Returns:
+        SSFeaturizer instance or None.
+    """
+    ss_info = configs.get("secondary_structure", {})
+    if not ss_info.get("enable", False):
+        return None
+
+    bpp_dir = ss_info.get("bpp_dir", "")
+    index_path = ss_info.get("index_path", "")
+
+    if not bpp_dir or not index_path:
+        logger.warning(
+            "secondary_structure.enable=True but bpp_dir or index_path is empty. "
+            "All RNA chains will get zero SS features."
+        )
+
+    logger.info(
+        f"SS featurizer enabled: bpp_dir={bpp_dir}, index_path={index_path}, "
+        f"n_pair_ch={ss_info.get('n_pair_channels', 4)}, "
+        f"n_single_ch={ss_info.get('n_single_channels', 3)}, "
+        f"boundary_margin={ss_info.get('boundary_margin', 10)}"
+    )
+    return SSFeaturizer(
+        bpp_dir=bpp_dir,
+        index_path=index_path,
+        n_pair_channels=ss_info.get("n_pair_channels", 4),
+        n_single_channels=ss_info.get("n_single_channels", 3),
+        boundary_margin=ss_info.get("boundary_margin", 10),
+    )
+# === End Secondary Structure Featurizer ===
 
 
 class WeightedMultiDataset(Dataset):
@@ -1441,6 +1525,8 @@ def get_datasets(
             "rnalm_separate_dna": configs.get("rnalm", {}).get("separate_dna_projection", False),
             "rna_template_featurizer": get_rna_template_featurizer(configs),  # === RNA Template ===
             "ribonanza_tokenizer": get_ribonanza_tokenizer(configs),  # === RibonanzaNet2 ===
+            "ss_featurizer": get_ss_featurizer(configs),  # === Secondary Structure ===
+            "ss_dropout": configs.get("secondary_structure", {}).get("ss_dropout", 0.0),
             "lig_atom_rename": config_dict.get("lig_atom_rename", False),
             "shuffle_mols": config_dict.get("shuffle_mols", False),
             "shuffle_sym_ids": config_dict.get("shuffle_sym_ids", False),
