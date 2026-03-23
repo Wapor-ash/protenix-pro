@@ -6,6 +6,7 @@
 #   2. Edit variables below.
 #   3. Run:
 #        bash finetune/train_pipeline.sh finetune/train_config.sh
+#        bash finetune/inference_pipeline.sh finetune/train_config.sh
 #
 # Notes:
 # - This config is sourced by bash, so keep values shell-safe.
@@ -23,11 +24,11 @@ RUN_NAME=""
 USE_WANDB="true"
 
 # PRINT_ONLY choices: "true" | "false"
-# When true, train_pipeline.sh prints the assembled command and exits.
+# When true, train_pipeline.sh / inference_pipeline.sh print the assembled command and exit.
 PRINT_ONLY="false"
 
-# CONDA_ENV choices: existing conda env name, or "" to skip activation
-CONDA_ENV="protenix"
+# CONDA_ENV choices: conda env name, absolute env path, or "" to skip activation
+CONDA_ENV="/inspire/ssd/project/sais-bio/public/ash_proj/conda/envs/tune_protenix"
 
 
 # ===================== Project Paths =====================
@@ -37,6 +38,9 @@ PROJECT_ROOT="/inspire/ssd/project/sais-bio/public/ash_proj"
 # PROTENIX_DIR choices: absolute path to the Protenix repo root
 PROTENIX_DIR="${PROJECT_ROOT}/code/protenix_pro/Protenix"
 
+# OUTPUT_ROOT choices: base output directory for train / inference artifacts
+OUTPUT_ROOT="${PROTENIX_DIR}/output"
+
 # DATA_DIR choices: absolute path to the RNA finetune dataset root
 DATA_DIR="${PROJECT_ROOT}/data/stanford-rna-3d-folding/part2"
 
@@ -45,6 +49,9 @@ PREPARED_DATA_DIR="${DATA_DIR}/protenix_prepared"
 
 # CHECKPOINT_PATH choices: absolute path to a base checkpoint .pt file
 CHECKPOINT_PATH="${PROTENIX_DIR}/checkpoints/protenix_base_20250630_v1.0.0.pt"
+
+# LOAD_EMA_CHECKPOINT_PATH choices: "" or absolute path to EMA checkpoint .pt
+LOAD_EMA_CHECKPOINT_PATH=""
 
 
 # ===================== Dataset / Split Config =====================
@@ -94,6 +101,10 @@ TRIANGLE_MULTIPLICATIVE_IMPL="cuequivariance"
 
 # PYTHON_BIN choices: "python3" | absolute python path
 PYTHON_BIN="python3"
+
+# LAYERNORM_TYPE_VALUE choices: "" | "fast_layernorm" | "torch"
+# Leave empty to keep repo default. Set "torch" if you need portable fallback.
+LAYERNORM_TYPE_VALUE=""
 
 
 # ===================== Common Training Params =====================
@@ -300,6 +311,48 @@ RNA3DB_METADATA_PATH="${PROJECT_ROOT}/data/RNA3D/rna3db-jsons/filter.json"
 PDB_RNA_DIR="${DATA_DIR}/PDB_RNA"
 
 
+# ===================== RNA SS Pair-Prior Params =====================
+# USE_RNA_SS choices: "true" | "false"
+USE_RNA_SS="false"
+
+# RNA_SS_SEQUENCE_FPATH choices: "" or absolute path to sequence->prior CSV
+# Empty + RNA_SS_STRICT=false means graceful zero-prior fallback.
+RNA_SS_SEQUENCE_FPATH=""
+
+# RNA_SS_FEATURE_DIR choices: "" or absolute path to prior root directory
+RNA_SS_FEATURE_DIR=""
+
+# RNA_SS_FORMAT choices: "sparse_npz" | "dense_npz"
+RNA_SS_FORMAT="sparse_npz"
+
+# RNA_SS_N_CLASSES choices: fixed to "6" for [P_in, o_i, o_j, r_i, r_j, m_ij]
+RNA_SS_N_CLASSES="6"
+
+# RNA_SS_COVERAGE_WINDOW choices: non-negative integer
+RNA_SS_COVERAGE_WINDOW="8"
+
+# RNA_SS_STRICT choices: "true" | "false"
+RNA_SS_STRICT="false"
+
+# RNA_SS_MIN_PROB choices: non-negative float
+RNA_SS_MIN_PROB="0.0"
+
+# RNA_SS_ARCHITECTURE choices: "mlp" | "transformer"
+RNA_SS_ARCHITECTURE="mlp"
+
+# RNA_SS_HIDDEN_DIM choices: positive integer
+RNA_SS_HIDDEN_DIM="128"
+
+# RNA_SS_N_LAYERS choices: positive integer
+RNA_SS_N_LAYERS="3"
+
+# RNA_SS_ALPHA_INIT choices: positive float
+RNA_SS_ALPHA_INIT="0.01"
+
+# RNA_SS_INIT_METHOD choices: "kaiming"
+RNA_SS_INIT_METHOD="kaiming"
+
+
 # ===================== RNA MSA / Protein Template Flags =====================
 # USE_RNA_MSA choices: "true" | "false"
 USE_RNA_MSA="true"
@@ -318,3 +371,76 @@ USE_PROT_MSA="false"
 
 # USE_PROT_TEMPLATE choices: "true" | "false"
 USE_PROT_TEMPLATE="false"
+
+
+# ===================== Inference Params =====================
+# INFER_CHECKPOINT_PATH choices: absolute path to inference checkpoint .pt
+INFER_CHECKPOINT_PATH="${CHECKPOINT_PATH}"
+
+# INFER_MODEL_NAME choices: logical model name used by runner/inference.py
+# Usually keep it aligned with MODEL_NAME_ARG.
+INFER_MODEL_NAME="${MODEL_NAME_ARG}"
+
+# INFER_RUN_NAME choices: any string, or "" to derive from input json basename
+INFER_RUN_NAME=""
+
+# INFER_INPUT_JSON choices: absolute path to inference input JSON
+INFER_INPUT_JSON=""
+
+# INFER_DUMP_DIR choices: "" for auto under OUTPUT_ROOT/inference, or absolute path
+INFER_DUMP_DIR=""
+
+# INFER_LOAD_STRICT choices: "true" | "false"
+INFER_LOAD_STRICT="false"
+
+# INFER_NUM_WORKERS choices: non-negative integer
+INFER_NUM_WORKERS="0"
+
+# INFER_SEEDS choices: comma-separated integers, e.g. "101" or "101,102"
+INFER_SEEDS="101"
+
+# INFER_USE_SEEDS_IN_JSON choices: "true" | "false"
+INFER_USE_SEEDS_IN_JSON="false"
+
+# INFER_DTYPE choices: "bf16" | "fp16" | repo-supported dtype
+INFER_DTYPE="${DTYPE}"
+
+# INFER_N_SAMPLE choices: positive integer
+INFER_N_SAMPLE="1"
+
+# INFER_N_STEP choices: positive integer
+INFER_N_STEP="${SAMPLE_DIFFUSION_N_STEP}"
+
+# INFER_N_CYCLE choices: positive integer
+INFER_N_CYCLE="${MODEL_N_CYCLE}"
+
+# INFER_USE_MSA choices: "true" | "false"
+INFER_USE_MSA="false"
+
+# INFER_USE_TEMPLATE choices: "true" | "false"
+INFER_USE_TEMPLATE="false"
+
+# INFER_USE_RNA_MSA choices: "true" | "false"
+INFER_USE_RNA_MSA="false"
+
+# INFER_NEED_ATOM_CONFIDENCE choices: "true" | "false"
+INFER_NEED_ATOM_CONFIDENCE="false"
+
+# INFER_SORTED_BY_RANKING_SCORE choices: "true" | "false"
+INFER_SORTED_BY_RANKING_SCORE="true"
+
+# INFER_ENABLE_TF32 choices: "true" | "false"
+INFER_ENABLE_TF32="true"
+
+# INFER_ENABLE_EFFICIENT_FUSION choices: "true" | "false"
+INFER_ENABLE_EFFICIENT_FUSION="true"
+
+# INFER_ENABLE_DIFFUSION_SHARED_VARS_CACHE choices: "true" | "false"
+INFER_ENABLE_DIFFUSION_SHARED_VARS_CACHE="true"
+
+
+# ===================== Escape Hatches =====================
+# TRAIN_EXTRA_ARGS / INFER_EXTRA_ARGS choices:
+# shell-authored extra CLI overrides appended verbatim at the end.
+TRAIN_EXTRA_ARGS=""
+INFER_EXTRA_ARGS=""

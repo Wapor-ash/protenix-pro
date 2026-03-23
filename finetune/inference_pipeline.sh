@@ -20,7 +20,6 @@ set -u
 
 apply_defaults() {
     : "${OUTPUT_ROOT:=${PROTENIX_DIR}/output}"
-    : "${LOAD_EMA_CHECKPOINT_PATH:=}"
     : "${LAYERNORM_TYPE_VALUE:=}"
     : "${USE_RNA_SS:=false}"
     : "${RNA_SS_SEQUENCE_FPATH:=}"
@@ -35,7 +34,28 @@ apply_defaults() {
     : "${RNA_SS_N_LAYERS:=3}"
     : "${RNA_SS_ALPHA_INIT:=0.01}"
     : "${RNA_SS_INIT_METHOD:=kaiming}"
-    : "${TRAIN_EXTRA_ARGS:=}"
+    : "${INFER_CHECKPOINT_PATH:=${CHECKPOINT_PATH}}"
+    : "${INFER_MODEL_NAME:=${MODEL_NAME_ARG}}"
+    : "${INFER_RUN_NAME:=}"
+    : "${INFER_INPUT_JSON:=}"
+    : "${INFER_DUMP_DIR:=}"
+    : "${INFER_LOAD_STRICT:=false}"
+    : "${INFER_NUM_WORKERS:=0}"
+    : "${INFER_SEEDS:=101}"
+    : "${INFER_USE_SEEDS_IN_JSON:=false}"
+    : "${INFER_DTYPE:=${DTYPE}}"
+    : "${INFER_N_SAMPLE:=1}"
+    : "${INFER_N_STEP:=${SAMPLE_DIFFUSION_N_STEP}}"
+    : "${INFER_N_CYCLE:=${MODEL_N_CYCLE}}"
+    : "${INFER_USE_MSA:=false}"
+    : "${INFER_USE_TEMPLATE:=false}"
+    : "${INFER_USE_RNA_MSA:=false}"
+    : "${INFER_NEED_ATOM_CONFIDENCE:=false}"
+    : "${INFER_SORTED_BY_RANKING_SCORE:=true}"
+    : "${INFER_ENABLE_TF32:=true}"
+    : "${INFER_ENABLE_EFFICIENT_FUSION:=true}"
+    : "${INFER_ENABLE_DIFFUSION_SHARED_VARS_CACHE:=true}"
+    : "${INFER_EXTRA_ARGS:=}"
 }
 
 apply_defaults
@@ -72,7 +92,6 @@ append_args_from_string() {
     local raw="${2:-}"
     [ -n "${raw}" ] || return 0
     local -n target_ref="${target_name}"
-    # Deliberately split on shell words for config-authored extra args.
     # shellcheck disable=SC2206
     local extra_args=( ${raw} )
     target_ref+=("${extra_args[@]}")
@@ -90,99 +109,6 @@ validate_choice() {
     done
     echo "ERROR: ${label}='${value}' is invalid. Allowed: $*" >&2
     exit 1
-}
-
-validate_config() {
-    validate_choice "${TRAIN_MODE}" "TRAIN_MODE" "1stage" "2stage"
-    validate_choice "${INJECTION_MODE}" "INJECTION_MODE" "input" "diffusion" "both"
-    validate_choice "${GATE_MODE}" "GATE_MODE" "none" "scalar" "token" "dual"
-    validate_choice "${RNA_PROJECTOR_INIT}" "RNA_PROJECTOR_INIT" "protein" "zero"
-    validate_choice "${RNA_SS_FORMAT}" "RNA_SS_FORMAT" "sparse_npz" "dense_npz"
-    validate_choice "${RNA_SS_ARCHITECTURE}" "RNA_SS_ARCHITECTURE" "mlp" "transformer"
-    validate_choice "${RNA_SS_INIT_METHOD}" "RNA_SS_INIT_METHOD" "kaiming"
-
-    as_bool "${USE_WANDB}" >/dev/null
-    as_bool "${PRINT_ONLY}" >/dev/null
-    as_bool "${USE_RNALM}" >/dev/null
-    as_bool "${USE_RIBONANZA}" >/dev/null
-    as_bool "${USE_RNA}" >/dev/null
-    as_bool "${USE_DNA}" >/dev/null
-    as_bool "${USE_RNA_TEMPLATE}" >/dev/null
-    as_bool "${USE_RNA_MSA}" >/dev/null
-    as_bool "${USE_PROT_MSA}" >/dev/null
-    as_bool "${USE_PROT_TEMPLATE}" >/dev/null
-    as_bool "${VAL_FIND_EVAL_CHAIN_INTERFACE}" >/dev/null
-    as_bool "${VAL_GROUP_BY_PDB_ID}" >/dev/null
-    as_bool "${ADAM_USE_ADAMW}" >/dev/null
-    as_bool "${CONFIDENCE_STOP_GRADIENT}" >/dev/null
-    as_bool "${RNALM_SEPARATE_DNA_PROJECTION}" >/dev/null
-    as_bool "${RNA_LOSS_ENABLE}" >/dev/null
-    as_bool "${LOAD_STRICT}" >/dev/null
-    as_bool "${USE_RNA_SS}" >/dev/null
-    as_bool "${RNA_SS_STRICT}" >/dev/null
-
-    require_dir "${PROTENIX_DIR}" "PROTENIX_DIR"
-    require_file "${CHECKPOINT_PATH}" "CHECKPOINT_PATH"
-    if [ -n "${LOAD_EMA_CHECKPOINT_PATH}" ]; then
-        require_file "${LOAD_EMA_CHECKPOINT_PATH}" "LOAD_EMA_CHECKPOINT_PATH"
-    fi
-    require_dir "${RNA_CIF_DIR}" "RNA_CIF_DIR"
-    require_dir "${BIOASSEMBLY_DIR}" "BIOASSEMBLY_DIR"
-    require_file "${TRAIN_INDICES_FPATH}" "TRAIN_INDICES_FPATH"
-    require_file "${TRAIN_PDB_LIST}" "TRAIN_PDB_LIST"
-    require_file "${VAL_INDICES_FPATH}" "VAL_INDICES_FPATH"
-    require_file "${VAL_PDB_LIST}" "VAL_PDB_LIST"
-
-    if [ "$(as_bool "${USE_RNALM}")" = "true" ]; then
-        if [ "$(as_bool "${USE_RNA}")" = "true" ]; then
-            require_file "${RNA_SEQUENCE_FPATH}" "RNA_SEQUENCE_FPATH"
-            require_dir "${RNA_EMBEDDING_DIR}" "RNA_EMBEDDING_DIR"
-        fi
-        if [ "$(as_bool "${USE_DNA}")" = "true" ]; then
-            require_file "${DNA_SEQUENCE_FPATH}" "DNA_SEQUENCE_FPATH"
-            require_dir "${DNA_EMBEDDING_DIR}" "DNA_EMBEDDING_DIR"
-        fi
-    fi
-
-    if [ "$(as_bool "${USE_RNA_TEMPLATE}")" = "true" ]; then
-        require_dir "${RNA_DATABASE_DIR}" "RNA_DATABASE_DIR"
-        require_file "${RNA_SEARCH_RESULTS}" "RNA_SEARCH_RESULTS"
-        require_dir "${PDB_RNA_DIR}" "PDB_RNA_DIR"
-        require_file "${RNA3DB_METADATA_PATH}" "RNA3DB_METADATA_PATH"
-        if [ -n "${MANUAL_TEMPLATE_HINTS}" ]; then
-            require_file "${MANUAL_TEMPLATE_HINTS}" "MANUAL_TEMPLATE_HINTS"
-        fi
-    fi
-
-    if [ "$(as_bool "${USE_RNA_MSA}")" = "true" ]; then
-        require_dir "${RNA_MSA_RAW_DIR}" "RNA_MSA_RAW_DIR"
-        require_file "${RNA_MSA_INDEX_JSON}" "RNA_MSA_INDEX_JSON"
-    fi
-
-    if [ "$(as_bool "${USE_RIBONANZA}")" = "true" ]; then
-        require_dir "${RIBONANZA_MODEL_DIR}" "RIBONANZA_MODEL_DIR"
-        require_file "${RIBONANZA_MODEL_DIR}/pairwise.yaml" "Ribonanza pairwise.yaml"
-        require_file "${RIBONANZA_MODEL_DIR}/pytorch_model_fsdp.bin" "Ribonanza weights"
-        validate_choice "${RIBONANZA_GATE_TYPE}" "RIBONANZA_GATE_TYPE" "channel" "scalar"
-    fi
-
-    if [ "$(as_bool "${USE_RNA_SS}")" = "true" ]; then
-        if [ "${RNA_SS_N_CLASSES}" != "6" ]; then
-            echo "ERROR: RNA_SS_N_CLASSES must be 6, got ${RNA_SS_N_CLASSES}" >&2
-            exit 1
-        fi
-        if [ -n "${RNA_SS_SEQUENCE_FPATH}" ]; then
-            require_file "${RNA_SS_SEQUENCE_FPATH}" "RNA_SS_SEQUENCE_FPATH"
-        elif [ "$(as_bool "${RNA_SS_STRICT}")" = "true" ]; then
-            echo "ERROR: RNA_SS_SEQUENCE_FPATH is required when USE_RNA_SS=true and RNA_SS_STRICT=true" >&2
-            exit 1
-        else
-            warn "USE_RNA_SS=true but RNA_SS_SEQUENCE_FPATH is empty; priors will gracefully fall back to zeros."
-        fi
-        if [ -n "${RNA_SS_FEATURE_DIR}" ]; then
-            require_dir "${RNA_SS_FEATURE_DIR}" "RNA_SS_FEATURE_DIR"
-        fi
-    fi
 }
 
 resolve_conda_env_spec() {
@@ -240,10 +166,86 @@ activate_conda_env() {
     set -u
 }
 
+validate_config() {
+    validate_choice "${INJECTION_MODE}" "INJECTION_MODE" "input" "diffusion" "both"
+    validate_choice "${GATE_MODE}" "GATE_MODE" "none" "scalar" "token" "dual"
+    validate_choice "${RNA_PROJECTOR_INIT}" "RNA_PROJECTOR_INIT" "protein" "zero"
+    validate_choice "${RNA_SS_FORMAT}" "RNA_SS_FORMAT" "sparse_npz" "dense_npz"
+    validate_choice "${RNA_SS_ARCHITECTURE}" "RNA_SS_ARCHITECTURE" "mlp" "transformer"
+    validate_choice "${RNA_SS_INIT_METHOD}" "RNA_SS_INIT_METHOD" "kaiming"
+
+    as_bool "${PRINT_ONLY}" >/dev/null
+    as_bool "${USE_RNALM}" >/dev/null
+    as_bool "${USE_RIBONANZA}" >/dev/null
+    as_bool "${USE_RNA}" >/dev/null
+    as_bool "${USE_DNA}" >/dev/null
+    as_bool "${USE_RNA_TEMPLATE}" >/dev/null
+    as_bool "${USE_RNA_SS}" >/dev/null
+    as_bool "${RNA_SS_STRICT}" >/dev/null
+    as_bool "${RNALM_SEPARATE_DNA_PROJECTION}" >/dev/null
+    as_bool "${INFER_LOAD_STRICT}" >/dev/null
+    as_bool "${INFER_USE_SEEDS_IN_JSON}" >/dev/null
+    as_bool "${INFER_USE_MSA}" >/dev/null
+    as_bool "${INFER_USE_TEMPLATE}" >/dev/null
+    as_bool "${INFER_USE_RNA_MSA}" >/dev/null
+    as_bool "${INFER_NEED_ATOM_CONFIDENCE}" >/dev/null
+    as_bool "${INFER_SORTED_BY_RANKING_SCORE}" >/dev/null
+    as_bool "${INFER_ENABLE_TF32}" >/dev/null
+    as_bool "${INFER_ENABLE_EFFICIENT_FUSION}" >/dev/null
+    as_bool "${INFER_ENABLE_DIFFUSION_SHARED_VARS_CACHE}" >/dev/null
+
+    require_dir "${PROTENIX_DIR}" "PROTENIX_DIR"
+    require_file "${INFER_CHECKPOINT_PATH}" "INFER_CHECKPOINT_PATH"
+    require_file "${INFER_INPUT_JSON}" "INFER_INPUT_JSON"
+
+    if [ "$(as_bool "${USE_RNALM}")" = "true" ]; then
+        if [ "$(as_bool "${USE_RNA}")" = "true" ]; then
+            require_file "${RNA_SEQUENCE_FPATH}" "RNA_SEQUENCE_FPATH"
+            require_dir "${RNA_EMBEDDING_DIR}" "RNA_EMBEDDING_DIR"
+        fi
+        if [ "$(as_bool "${USE_DNA}")" = "true" ]; then
+            require_file "${DNA_SEQUENCE_FPATH}" "DNA_SEQUENCE_FPATH"
+            require_dir "${DNA_EMBEDDING_DIR}" "DNA_EMBEDDING_DIR"
+        fi
+    fi
+
+    if [ "$(as_bool "${USE_RNA_TEMPLATE}")" = "true" ]; then
+        require_dir "${RNA_DATABASE_DIR}" "RNA_DATABASE_DIR"
+        require_file "${RNA_SEARCH_RESULTS}" "RNA_SEARCH_RESULTS"
+        require_dir "${PDB_RNA_DIR}" "PDB_RNA_DIR"
+        require_file "${RNA3DB_METADATA_PATH}" "RNA3DB_METADATA_PATH"
+    fi
+
+    if [ "$(as_bool "${USE_RIBONANZA}")" = "true" ]; then
+        require_dir "${RIBONANZA_MODEL_DIR}" "RIBONANZA_MODEL_DIR"
+        require_file "${RIBONANZA_MODEL_DIR}/pairwise.yaml" "Ribonanza pairwise.yaml"
+        require_file "${RIBONANZA_MODEL_DIR}/pytorch_model_fsdp.bin" "Ribonanza weights"
+        validate_choice "${RIBONANZA_GATE_TYPE}" "RIBONANZA_GATE_TYPE" "channel" "scalar"
+    fi
+
+    if [ "$(as_bool "${USE_RNA_SS}")" = "true" ]; then
+        if [ "${RNA_SS_N_CLASSES}" != "6" ]; then
+            echo "ERROR: RNA_SS_N_CLASSES must be 6, got ${RNA_SS_N_CLASSES}" >&2
+            exit 1
+        fi
+        if [ -n "${RNA_SS_SEQUENCE_FPATH}" ]; then
+            require_file "${RNA_SS_SEQUENCE_FPATH}" "RNA_SS_SEQUENCE_FPATH"
+        elif [ "$(as_bool "${RNA_SS_STRICT}")" = "true" ]; then
+            echo "ERROR: RNA_SS_SEQUENCE_FPATH is required when USE_RNA_SS=true and RNA_SS_STRICT=true" >&2
+            exit 1
+        else
+            warn "USE_RNA_SS=true but RNA_SS_SEQUENCE_FPATH is empty; priors will gracefully fall back to zeros."
+        fi
+        if [ -n "${RNA_SS_FEATURE_DIR}" ]; then
+            require_dir "${RNA_SS_FEATURE_DIR}" "RNA_SS_FEATURE_DIR"
+        fi
+    fi
+}
+
 build_rnalm_args() {
     RNALM_ARGS=()
     if [ "$(as_bool "${USE_RNALM}")" != "true" ]; then
-        RNALM_ARGS+=(--rnalm.enable false)
+        RNALM_ARGS=(--rnalm.enable false)
         return 0
     fi
 
@@ -292,10 +294,6 @@ build_rna_template_args() {
         --rna_template.alpha_init "${RNA_TEMPLATE_ALPHA}"
         --model.template_embedder.n_blocks "${TEMPLATE_N_BLOCKS}"
     )
-
-    if [ -n "${MANUAL_TEMPLATE_HINTS}" ]; then
-        RNA_TEMPLATE_ARGS+=(--rna_template.manual_template_hints_path "${MANUAL_TEMPLATE_HINTS}")
-    fi
 }
 
 build_ribonanza_args() {
@@ -347,164 +345,72 @@ build_rna_ss_args() {
     fi
 }
 
+prepare_checkpoint_link() {
+    INFER_CKPT_DIR="$(mktemp -d)"
+    trap 'rm -rf "${INFER_CKPT_DIR}"' EXIT
+    ln -sf "$(realpath "${INFER_CHECKPOINT_PATH}")" "${INFER_CKPT_DIR}/${INFER_MODEL_NAME}.pt"
+}
+
 build_common_args() {
-    local resolved_run_name="${RUN_NAME}"
-    if [ -z "${resolved_run_name}" ]; then
-        if [ "${TRAIN_MODE}" = "1stage" ]; then
-            resolved_run_name="1stage_rna_finetune"
-            [ "$(as_bool "${USE_RIBONANZA}")" = "true" ] && resolved_run_name="${resolved_run_name}_rnet2"
-            [ "$(as_bool "${USE_RNALM}")" = "true" ] && resolved_run_name="${resolved_run_name}_llm_${INJECTION_MODE}"
-            [ "$(as_bool "${USE_RNA_SS}")" = "true" ] && resolved_run_name="${resolved_run_name}_rna_ss"
-            [ "$(as_bool "${USE_RNA_MSA}")" = "true" ] && resolved_run_name="${resolved_run_name}_rna_msa"
-            [ "$(as_bool "${USE_RNA_TEMPLATE}")" = "true" ] && resolved_run_name="${resolved_run_name}_rna_template"
-            resolved_run_name="${resolved_run_name}_alr${ADAPTER_LR}_blr${BACKBONE_LR}"
-        else
-            resolved_run_name="2stage_rna_finetune"
-            [ "$(as_bool "${USE_RIBONANZA}")" = "true" ] && resolved_run_name="${resolved_run_name}_rnet2"
-            [ "$(as_bool "${USE_RNALM}")" = "true" ] && resolved_run_name="${resolved_run_name}_llm_${INJECTION_MODE}"
-            [ "$(as_bool "${USE_RNA_SS}")" = "true" ] && resolved_run_name="${resolved_run_name}_rna_ss"
-            [ "$(as_bool "${USE_RNA_MSA}")" = "true" ] && resolved_run_name="${resolved_run_name}_rna_msa"
-            [ "$(as_bool "${USE_RNA_TEMPLATE}")" = "true" ] && resolved_run_name="${resolved_run_name}_rna_template"
-            resolved_run_name="${resolved_run_name}_s1a${STAGE1_ADAPTER_LR}_s1b${STAGE1_BACKBONE_LR}"
-        fi
-        [ "${GATE_MODE}" != "none" ] && resolved_run_name="${resolved_run_name}_gate_${GATE_MODE}"
+    local infer_name="${INFER_RUN_NAME}"
+    if [ -z "${infer_name}" ]; then
+        infer_name="$(basename "${INFER_INPUT_JSON}")"
+        infer_name="${infer_name%.json}"
     fi
-    RUN_NAME_RESOLVED="${resolved_run_name}"
 
-    if [ -n "${PROJECT_NAME}" ]; then
-        PROJECT_NAME_RESOLVED="${PROJECT_NAME}"
-    elif [ "${TRAIN_MODE}" = "1stage" ]; then
-        PROJECT_NAME_RESOLVED="protenix_rna_finetune_1stage"
+    if [ -n "${INFER_DUMP_DIR}" ]; then
+        RESOLVED_INFER_DUMP_DIR="${INFER_DUMP_DIR}"
     else
-        PROJECT_NAME_RESOLVED="protenix_rna_finetune_2stage"
+        RESOLVED_INFER_DUMP_DIR="${OUTPUT_ROOT}/inference/${infer_name}"
     fi
-
-    OUTPUT_DIR="${OUTPUT_ROOT}"
 
     COMMON_ARGS=(
-        --model_name "${MODEL_NAME_ARG}"
-        --run_name "${RUN_NAME_RESOLVED}"
-        --seed "${SEED}"
-        --base_dir "${OUTPUT_DIR}"
-        --dtype "${DTYPE}"
-        --project "${PROJECT_NAME_RESOLVED}"
-        --use_wandb "$(as_bool "${USE_WANDB}")"
-        --diffusion_batch_size "${DIFFUSION_BATCH_SIZE}"
-        --eval_interval "${EVAL_INTERVAL}"
-        --log_interval "${LOG_INTERVAL}"
-        --checkpoint_interval "${CHECKPOINT_INTERVAL}"
-        --train_crop_size "${TRAIN_CROP_SIZE}"
-        --max_steps "${MAX_STEPS}"
-        --lr "${LR}"
-        --lr_scheduler "${LR_SCHEDULER}"
-        --warmup_steps "${WARMUP_STEPS}"
-        --grad_clip_norm "${GRAD_CLIP_NORM}"
-        --model.N_cycle "${MODEL_N_CYCLE}"
-        --sample_diffusion.N_step "${SAMPLE_DIFFUSION_N_STEP}"
+        --model_name "${INFER_MODEL_NAME}"
+        --load_checkpoint_dir "${INFER_CKPT_DIR}"
+        --load_strict "$(as_bool "${INFER_LOAD_STRICT}")"
+        --input_json_path "${INFER_INPUT_JSON}"
+        --dump_dir "${RESOLVED_INFER_DUMP_DIR}"
+        --num_workers "${INFER_NUM_WORKERS}"
+        --seeds "${INFER_SEEDS}"
+        --use_seeds_in_json "$(as_bool "${INFER_USE_SEEDS_IN_JSON}")"
+        --dtype "${INFER_DTYPE}"
+        --use_msa "$(as_bool "${INFER_USE_MSA}")"
+        --use_template "$(as_bool "${INFER_USE_TEMPLATE}")"
+        --use_rna_msa "$(as_bool "${INFER_USE_RNA_MSA}")"
+        --need_atom_confidence "$(as_bool "${INFER_NEED_ATOM_CONFIDENCE}")"
+        --sorted_by_ranking_score "$(as_bool "${INFER_SORTED_BY_RANKING_SCORE}")"
+        --enable_tf32 "$(as_bool "${INFER_ENABLE_TF32}")"
+        --enable_efficient_fusion "$(as_bool "${INFER_ENABLE_EFFICIENT_FUSION}")"
+        --enable_diffusion_shared_vars_cache "$(as_bool "${INFER_ENABLE_DIFFUSION_SHARED_VARS_CACHE}")"
+        --model.N_cycle "${INFER_N_CYCLE}"
+        --sample_diffusion.N_sample "${INFER_N_SAMPLE}"
+        --sample_diffusion.N_step "${INFER_N_STEP}"
         --triangle_attention "${TRIANGLE_ATTENTION_IMPL}"
         --triangle_multiplicative "${TRIANGLE_MULTIPLICATIVE_IMPL}"
-        --load_checkpoint_path "${CHECKPOINT_PATH}"
-        --load_strict "$(as_bool "${LOAD_STRICT}")"
-        --data.num_dl_workers "${DATA_NUM_DL_WORKERS}"
-        --adam.use_adamw "$(as_bool "${ADAM_USE_ADAMW}")"
-        --adam.beta1 "${ADAM_BETA1}"
-        --adam.beta2 "${ADAM_BETA2}"
-        --adam.weight_decay "${ADAM_WEIGHT_DECAY}"
-        --loss.weight.alpha_bond "${LOSS_ALPHA_BOND}"
-        --rna_loss.enable "$(as_bool "${RNA_LOSS_ENABLE}")"
-        --model.confidence_head.stop_gradient "$(as_bool "${CONFIDENCE_STOP_GRADIENT}")"
     )
 
-    if [ "${TRAIN_MODE}" = "1stage" ]; then
-        COMMON_ARGS+=(--ema_decay "${EMA_DECAY}")
-    fi
-
-    if [ -n "${LOAD_EMA_CHECKPOINT_PATH}" ]; then
-        COMMON_ARGS+=(--load_ema_checkpoint_path "${LOAD_EMA_CHECKPOINT_PATH}")
-    fi
-
-    append_args_from_string "COMMON_ARGS" "${TRAIN_EXTRA_ARGS}"
-}
-
-build_stage_args() {
-    STAGE_ARGS=()
-    if [ "${TRAIN_MODE}" = "1stage" ]; then
-        STAGE_ARGS=(
-            --two_stage.enable false
-            --two_stage.adapter_lr "${ADAPTER_LR}"
-            --two_stage.backbone_lr "${BACKBONE_LR}"
-        )
-    else
-        STAGE_ARGS=(
-            --two_stage.enable true
-            --two_stage.stage1_max_steps "${STAGE1_MAX_STEPS}"
-            --two_stage.stage1_adapter_lr "${STAGE1_ADAPTER_LR}"
-            --two_stage.stage1_backbone_lr "${STAGE1_BACKBONE_LR}"
-            --two_stage.stage1_warmup_steps "${STAGE1_WARMUP_STEPS}"
-            --two_stage.stage2_adapter_lr "${STAGE2_ADAPTER_LR}"
-            --two_stage.stage2_backbone_lr "${STAGE2_BACKBONE_LR}"
-            --two_stage.stage2_warmup_steps "${STAGE2_WARMUP_STEPS}"
-            --two_stage.stage2_ema_decay "${STAGE2_EMA_DECAY}"
-        )
-    fi
-}
-
-build_data_args() {
-    DATA_ARGS=(
-        --data.train_sets "${TRAIN_SET}"
-        --data.${TRAIN_SET}.base_info.mmcif_dir "${RNA_CIF_DIR}"
-        --data.${TRAIN_SET}.base_info.bioassembly_dict_dir "${BIOASSEMBLY_DIR}"
-        --data.${TRAIN_SET}.base_info.indices_fpath "${TRAIN_INDICES_FPATH}"
-        --data.${TRAIN_SET}.base_info.pdb_list "${TRAIN_PDB_LIST}"
-        --data.test_sets "${VAL_SET}"
-        --data.${VAL_SET}.base_info.mmcif_dir "${RNA_CIF_DIR}"
-        --data.${VAL_SET}.base_info.bioassembly_dict_dir "${BIOASSEMBLY_DIR}"
-        --data.${VAL_SET}.base_info.indices_fpath "${VAL_INDICES_FPATH}"
-        --data.${VAL_SET}.base_info.pdb_list "${VAL_PDB_LIST}"
-        --data.${VAL_SET}.base_info.find_eval_chain_interface "$(as_bool "${VAL_FIND_EVAL_CHAIN_INTERFACE}")"
-        --data.${VAL_SET}.base_info.group_by_pdb_id "$(as_bool "${VAL_GROUP_BY_PDB_ID}")"
-        --data.${VAL_SET}.base_info.max_n_token "${VAL_MAX_N_TOKEN}"
-        --data.msa.enable_rna_msa "$(as_bool "${USE_RNA_MSA}")"
-        --data.msa.rna_msadir_raw_paths "${RNA_MSA_RAW_DIR}"
-        --data.msa.rna_seq_or_filename_to_msadir_jsons "${RNA_MSA_INDEX_JSON}"
-        --data.msa.rna_indexing_methods "${RNA_MSA_INDEXING_METHOD}"
-        --data.msa.enable_prot_msa "$(as_bool "${USE_PROT_MSA}")"
-        --data.template.enable_prot_template "$(as_bool "${USE_PROT_TEMPLATE}")"
-    )
+    append_args_from_string "COMMON_ARGS" "${INFER_EXTRA_ARGS}"
 }
 
 print_summary() {
     echo "========================================================"
-    echo "  Protenix Unified Train Pipeline"
+    echo "  Protenix Unified Inference Pipeline"
     echo "  config:             ${CONFIG_PATH}"
-    echo "  train_mode:         ${TRAIN_MODE}"
-    echo "  use_ribonanza:      ${USE_RIBONANZA}"
+    echo "  checkpoint:         ${INFER_CHECKPOINT_PATH}"
+    echo "  input_json:         ${INFER_INPUT_JSON}"
+    echo "  dump_dir:           ${RESOLVED_INFER_DUMP_DIR}"
+    echo "  model_name:         ${INFER_MODEL_NAME}"
     echo "  use_rnalm:          ${USE_RNALM}"
+    echo "  use_ribonanza:      ${USE_RIBONANZA}"
     echo "  use_rna_ss:         ${USE_RNA_SS}"
     echo "  use_rna_template:   ${USE_RNA_TEMPLATE}"
-    echo "  use_rna_msa:        ${USE_RNA_MSA}"
-    echo "  use_rna_loss:       ${RNA_LOSS_ENABLE}"
-    echo "  injection_mode:     ${INJECTION_MODE}"
-    echo "  gate_mode:          ${GATE_MODE}"
-    if [ "$(as_bool "${USE_RIBONANZA}")" = "true" ]; then
-        echo "  rnet_model_dir:     ${RIBONANZA_MODEL_DIR}"
-        echo "  rnet_gate_type:     ${RIBONANZA_GATE_TYPE}"
-        echo "  rnet_pf_blocks:     ${RIBONANZA_N_PAIRFORMER_BLOCKS}"
-    fi
+    echo "  use_msa:            ${INFER_USE_MSA}"
+    echo "  use_template:       ${INFER_USE_TEMPLATE}"
+    echo "  seeds:              ${INFER_SEEDS}"
     if [ "$(as_bool "${USE_RNA_SS}")" = "true" ]; then
         echo "  rna_ss_index:       ${RNA_SS_SEQUENCE_FPATH:-<empty>}"
         echo "  rna_ss_feature_dir: ${RNA_SS_FEATURE_DIR:-<empty>}"
         echo "  rna_ss_strict:      ${RNA_SS_STRICT}"
-        echo "  rna_ss_arch:        ${RNA_SS_ARCHITECTURE}"
-    fi
-    echo "  rna_projector_init: ${RNA_PROJECTOR_INIT}"
-    echo "  rna_template_alpha: ${RNA_TEMPLATE_ALPHA}"
-    echo "  template_n_blocks:  ${TEMPLATE_N_BLOCKS}"
-    echo "  max_steps:          ${MAX_STEPS}"
-    echo "  run_name:           ${RUN_NAME_RESOLVED}"
-    echo "  output_root:        ${OUTPUT_DIR}"
-    if [ -n "${MANUAL_TEMPLATE_HINTS}" ]; then
-        echo "  manual_hints:       ${MANUAL_TEMPLATE_HINTS}"
     fi
     echo "========================================================"
 }
@@ -535,22 +441,19 @@ main() {
     build_rna_template_args
     build_ribonanza_args
     build_rna_ss_args
+    prepare_checkpoint_link
     build_common_args
-    build_stage_args
-    build_data_args
 
-    mkdir -p "${OUTPUT_DIR}"
+    mkdir -p "${RESOLVED_INFER_DUMP_DIR}"
     print_summary
 
     CMD=(
-        "${PYTHON_BIN}" ./runner/train.py
+        "${PYTHON_BIN}" ./runner/inference.py
         "${COMMON_ARGS[@]}"
-        "${STAGE_ARGS[@]}"
         "${RNALM_ARGS[@]}"
         "${RIBONANZA_ARGS[@]}"
         "${RNA_SS_ARGS[@]}"
         "${RNA_TEMPLATE_ARGS[@]}"
-        "${DATA_ARGS[@]}"
     )
 
     if [ "$(as_bool "${PRINT_ONLY}")" = "true" ]; then

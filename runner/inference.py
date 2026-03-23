@@ -238,6 +238,25 @@ class InferenceRunner(object):
                 self.print(
                     f"RNA template weights found in checkpoint: {rna_tpl_keys_in_ckpt}"
                 )
+
+        rna_ss_configs = self.configs.get("rna_ss", {})
+        if rna_ss_configs.get("enable", False):
+            rna_ss_keys_in_ckpt = [
+                k for k in ckpt_keys
+                if "constraint_embedder.substructure_z_embedder" in k
+                or "constraint_embedder.substructure_log_alpha" in k
+            ]
+            if not rna_ss_keys_in_ckpt:
+                raise RuntimeError(
+                    "rna_ss.enable=True but checkpoint contains NO RNA SS substructure "
+                    "embedder weights. Inference requires a finetuned checkpoint that was "
+                    "trained with rna_ss.enable=True. Either load a proper checkpoint or "
+                    "set rna_ss.enable=false."
+                )
+            else:
+                self.print(
+                    f"RNA SS weights found in checkpoint: {rna_ss_keys_in_ckpt}"
+                )
         # === End inference projector validation ===
 
         def count_parameters(model: torch.nn.Module) -> float:
