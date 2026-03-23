@@ -145,6 +145,7 @@ model_configs = {
         # it should be False, for inference, it should be True.
         "finetune_params_with_substring": [
             "constraint_embedder.substructure_z_embedder",
+            "constraint_embedder.substructure_log_alpha",
             "constraint_embedder.pocket_z_embedder",
             "constraint_embedder.contact_z_embedder",
             "constraint_embedder.contact_atom_z_embedder",

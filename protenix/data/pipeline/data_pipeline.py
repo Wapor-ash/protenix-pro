@@ -246,7 +246,7 @@ class DataPipeline(object):
         spatial_crop_complete_lig: bool = False,
         drop_last: bool = False,
         remove_metal: bool = False,
-    ) -> tuple[str, TokenArray, AtomArray, dict[str, Any], dict[str, Any]]:
+    ) -> tuple[str, TokenArray, AtomArray, dict[str, Any], dict[str, Any], int, np.ndarray]:
         """
         Crop data based on the crop size and reference chain indices.
 
@@ -264,15 +264,17 @@ class DataPipeline(object):
             remove_metal (bool): Whether to remove metal atoms from the crop.
 
         Returns:
-            tuple[str, TokenArray, AtomArray, dict[str, Any], dict[str, Any]]:
+            tuple[str, TokenArray, AtomArray, dict[str, Any], dict[str, Any], int, np.ndarray]:
                 crop_method (str): The crop method.
                 cropped_token_array (TokenArray): TokenArray after cropping.
                 cropped_atom_array (AtomArray): AtomArray after cropping.
                 cropped_msa_features (dict[str, Any]): The cropped msa features.
                 cropped_template_features (dict[str, Any]): The cropped template features.
+                reference_token_index (int): Reference token index for crop bookkeeping.
+                selected_indices (np.ndarray): Indices of cropped tokens in the full token array.
         """
         if crop_size <= 0:
-            selected_indices = None
+            selected_indices = np.arange(len(bioassembly_dict["token_array"]), dtype=np.int64)
             # Prepare msa
             msa_features = DataPipeline.get_msa_raw_features(
                 bioassembly_dict=bioassembly_dict,
@@ -292,6 +294,7 @@ class DataPipeline(object):
                 msa_features or {},
                 template_features or {},
                 -1,
+                selected_indices,
             )
 
         ref_chain_indices = DataPipeline._map_ref_chain(
@@ -345,6 +348,7 @@ class DataPipeline(object):
             cropped_msa_features,
             cropped_template_features,
             reference_token_index,
+            selected_indices,
         )
 
     @staticmethod

@@ -26,10 +26,10 @@ from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
 from protenix.data.esm.esm_featurizer import ESMFeaturizer
 from protenix.data.inference.json_to_feature import SampleDictToFeatures
+from protenix.data.msa.msa_featurizer import InferenceMSAFeaturizer
+from protenix.data.rna_ss.rna_ss_featurizer import RNASSFeaturizer
 from protenix.data.rna_template.rna_template_featurizer import RNATemplateFeaturizer
 from protenix.data.rnalm.rnalm_featurizer import RiNALMoFeaturizer
-from protenix.data.msa.msa_featurizer import InferenceMSAFeaturizer
-from protenix.data.ss.ss_featurizer import SSFeaturizer
 from protenix.data.template.template_featurizer import InferenceTemplateFeaturizer
 from protenix.data.template.template_utils import TemplateHitFeaturizer
 from protenix.data.utils import (
@@ -258,30 +258,32 @@ class InferenceDataset(Dataset):
         self.ribonanza_tokenizer = None
         if rnet2_configs.get("enable", False):
             from protenix.data.ribonanza.ribonanza_tokenizer import RibonanzaTokenizer
+
             self.ribonanza_tokenizer = RibonanzaTokenizer()
             logger.info("RibonanzaNet2 tokenizer enabled for inference.")
         # === End RibonanzaNet2 Tokenizer ===
 
-        # === RNA Secondary Structure (BPP) Featurizer ===
-        ss_info = configs.get("secondary_structure", {})
-        self.ss_featurizer = None
-        if ss_info.get("enable", False):
-            self.ss_featurizer = SSFeaturizer(
-                bpp_dir=ss_info.get("bpp_dir", ""),
-                index_path=ss_info.get("index_path", ""),
-                n_pair_channels=ss_info.get("n_pair_channels", 4),
-                n_single_channels=ss_info.get("n_single_channels", 3),
-                boundary_margin=ss_info.get("boundary_margin", 10),
+        # === RNA SS pair prior ===
+        rna_ss_info = configs.get("rna_ss", {})
+        self.rna_ss_featurizer = None
+        if rna_ss_info.get("enable", False):
+            self.rna_ss_featurizer = RNASSFeaturizer(
+                sequence_fpath=rna_ss_info.get("sequence_fpath", ""),
+                feature_dir=rna_ss_info.get("feature_dir", ""),
+                format=rna_ss_info.get("format", "sparse_npz"),
+                n_classes=rna_ss_info.get("n_classes", 6),
+                coverage_window=rna_ss_info.get("coverage_window", 8),
+                strict=rna_ss_info.get("strict", False),
+                min_prob=rna_ss_info.get("min_prob", 0.0),
             )
             logger.info(
-                "SS featurizer enabled for inference: "
-                f"bpp_dir={ss_info.get('bpp_dir', '')}, "
-                f"index_path={ss_info.get('index_path', '')}, "
-                f"n_pair_ch={ss_info.get('n_pair_channels', 4)}, "
-                f"n_single_ch={ss_info.get('n_single_channels', 3)}, "
-                f"boundary_margin={ss_info.get('boundary_margin', 10)}"
+                "RNA SS featurizer enabled for inference: "
+                f"sequence_fpath={rna_ss_info.get('sequence_fpath', '')}, "
+                f"feature_dir={rna_ss_info.get('feature_dir', '')}, "
+                f"format={rna_ss_info.get('format', 'sparse_npz')}, "
+                f"coverage_window={rna_ss_info.get('coverage_window', 8)}"
             )
-        # === End RNA Secondary Structure ===
+        # === End RNA SS pair prior ===
 
     def process_one(
         self,
@@ -367,6 +369,7 @@ class InferenceDataset(Dataset):
         # === RNA Template Features ===
         if self.rna_template_enable and self.rna_template_featurizer is not None:
             import numpy as np
+
             rna_template_features = self.rna_template_featurizer(
                 token_array=token_array,
                 atom_array=atom_array,
@@ -388,19 +391,17 @@ class InferenceDataset(Dataset):
             features_dict.update(ribo_result)
         # === End RibonanzaNet2 Tokenizer ===
 
-        # === RNA Secondary Structure (BPP) Features ===
-        if self.ss_featurizer is not None:
-            ss_result = self.ss_featurizer(
-                token_array=token_array,
-                atom_array=atom_array,
-                bioassembly_dict={
-                    "name": single_sample_dict.get("name", "unknown"),
-                    "sequences": sample2feat.entity_to_sequences,
-                },
-                inference_mode=True,
+        if self.rna_ss_featurizer is not None:
+            rna_ss_result = self.rna_ss_featurizer(
+                full_token_array=token_array,
+                full_atom_array=atom_array,
+                cropped_token_array=token_array,
+                cropped_atom_array=atom_array,
+                entity_to_sequences=sample2feat.entity_to_sequences,
+                selected_token_indices=None,
             )
-            features_dict.update(ss_result)
-        # === End RNA Secondary Structure ===
+            constraint_feature = features_dict.setdefault("constraint_feature", {})
+            constraint_feature["substructure"] = rna_ss_result["substructure"]
 
         # MSA semantics:
         # - use_msa=True but no usable MSA was found -> create full dummy MSA.

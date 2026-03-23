@@ -63,7 +63,7 @@ basic_configs = {
     "two_stage": {
         "enable": False,
         # Comma-separated substrings to identify adapter (new module) params
-        "adapter_keywords": "rnalm_projection,rna_projection,dna_projection,linear_rnalm,linear_rna_llm,linear_dna_llm,rnalm_alpha_logit,rnalm_gate_mlp,linear_no_bias_a_rna,rna_template_alpha,rna_template_gate,layer_weights,projection_sequence_features,projection_pairwise_features,gated_sequence_feature_injector,gated_pairwise_feature_injector,ribonanza_pairformer_stack,ss_pair_embedder,ss_single_adapter",
+        "adapter_keywords": "rnalm_projection,rna_projection,dna_projection,linear_rnalm,linear_rna_llm,linear_dna_llm,rnalm_alpha_logit,rnalm_gate_mlp,linear_no_bias_a_rna,rna_template_alpha,rna_template_gate,layer_weights,projection_sequence_features,projection_pairwise_features,gated_sequence_feature_injector,gated_pairwise_feature_injector,ribonanza_pairformer_stack,constraint_embedder.substructure_z_embedder,constraint_embedder.substructure_log_alpha",
         # === 1-stage per-group LR (used when enable=False) ===
         # Set adapter_lr and/or backbone_lr to enable per-group LR splitting.
         # -1 means use the global lr for that group. 0 means freeze.
@@ -168,21 +168,19 @@ data_configs = {
         # Entities/PDBs not in the file use the default online/offline search pipeline.
         "manual_template_hints_path": "",
     },
-    # === RNA Secondary Structure (BPP) Feature Integration ===
-    # Inject pre-computed Base-Pair Probability (BPP) matrices as crop-aware features.
-    # Pair features (4-ch): P_in, 1-P_in, outside_mass, boundary_mask → z_init via SSPairEmbedder
-    # Single features (3-ch): p_out, p_in, p_unp → s_inputs via zero-init additive adapter
-    # When enable=False, the model is identical to the original — no new modules are created.
-    "secondary_structure": {
+    # === RNA Secondary Structure Pair Prior ===
+    # Reuses constraint_feature["substructure"] so RNA SS only enters through z_init.
+    # Output channel order is fixed to:
+    # [P_in_ij, o_i, o_j, r_i, r_j, m_ij]
+    "rna_ss": {
         "enable": False,
-        "bpp_dir": "",              # Directory containing pre-computed BPP .npz/.npy files
-        "index_path": "",           # JSON mapping RNA sequences to BPP file paths
-        "n_pair_channels": 4,       # Number of pair feature channels
-        "n_single_channels": 3,     # Number of single feature channels (p_out, p_in, p_unp)
-        "boundary_margin": 10,      # Tokens from crop edge for boundary mask decay
-        "ss_dropout": 0.1,          # Probability of zeroing all SS features during training
-        "pair_hidden_dim": 32,      # Hidden dim for SS pair embedder MLP
-        "pair_n_layers": 2,         # Number of MLP layers for SS pair embedder
+        "sequence_fpath": "",       # CSV: sequence,path
+        "feature_dir": "",          # Optional root for relative prior paths
+        "format": "sparse_npz",     # sparse_npz or dense_npz
+        "n_classes": 6,             # Fixed pair channels: [P_in, o_i, o_j, r_i, r_j, m_ij]
+        "coverage_window": 8,       # Radius for local crop coverage reliability
+        "strict": False,            # Missing priors raise when True, else fall back to zeros
+        "min_prob": 0.0,            # Threshold small probabilities during loading
     },
     # === RibonanzaNet2 Integration (following RNAPro pattern) ===
     # Loads a pretrained RibonanzaNet2 model (frozen) and extracts multi-layer
@@ -367,6 +365,7 @@ model_configs = {
                 "architecture": "transformer",
                 "hidden_dim": 128,
                 "n_layers": 1,
+                "alpha_init": 1e-2,
             },
             "contact_atom_embedder": {
                 "enable": False,

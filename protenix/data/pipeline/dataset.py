@@ -33,8 +33,8 @@ from protenix.data.core.featurizer import Featurizer
 from protenix.data.msa.msa_featurizer import MSAFeaturizer
 from protenix.data.pipeline.data_pipeline import DataPipeline
 from protenix.data.esm.esm_featurizer import ESMFeaturizer
+from protenix.data.rna_ss.rna_ss_featurizer import RNASSFeaturizer
 from protenix.data.rnalm.rnalm_featurizer import RiNALMoFeaturizer
-from protenix.data.ss.ss_featurizer import SSFeaturizer
 from protenix.data.template.template_featurizer import TemplateFeaturizer
 from protenix.data.tokenizer import TokenArray
 from protenix.data.utils import (
@@ -139,9 +139,12 @@ class BaseSingleDataset(Dataset):
         # === RibonanzaNet2 Tokenizer ===
         self.ribonanza_tokenizer = kwargs.get("ribonanza_tokenizer", None)
 
-        # === Secondary Structure (BPP) Featurizer ===
-        self.ss_featurizer = kwargs.get("ss_featurizer", None)
-        self.ss_dropout = kwargs.get("ss_dropout", 0.0)
+        # === RNA Secondary Structure pair-prior featurizer ===
+        self.rna_ss_featurizer = kwargs.get("rna_ss_featurizer", None)
+        if self.rna_ss_featurizer is not None and self.constraint.get("enable", False):
+            raise NotImplementedError(
+                "v1: RNA SS pair prior is not combined with manual contact/pocket constraints in training."
+            )
 
         # Read data
         self.indices_list = self.read_indices_list(indices_fpath)
@@ -518,6 +521,7 @@ class BaseSingleDataset(Dataset):
             cropped_msa_features,
             cropped_template_features,
             reference_token_index,
+            selected_indices,
         ) = self.crop(
             sample_indice=sample_indice,
             bioassembly_dict=bioassembly_dict,
@@ -594,21 +598,15 @@ class BaseSingleDataset(Dataset):
             feat.update(ribo_result)
         # === End RibonanzaNet2 Tokenizer ===
 
-        # === Secondary Structure (BPP) Features ===
-        if self.ss_featurizer is not None:
-            ss_result = self.ss_featurizer(
-                token_array=cropped_token_array,
-                atom_array=cropped_atom_array,
-                bioassembly_dict=bioassembly_dict,
-                inference_mode=False,
-            )
-            # Apply SS dropout during training: zero out all SS features with probability ss_dropout
-            if self.ss_dropout > 0.0 and random.random() < self.ss_dropout:
-                # Zero out — model sees no SS info for this sample
-                for key in ss_result:
-                    ss_result[key] = torch.zeros_like(ss_result[key])
-            feat.update(ss_result)
-        # === End Secondary Structure ===
+        feat = self._merge_rna_ss_feature(
+            feat=feat,
+            full_token_array=bioassembly_dict["token_array"],
+            full_atom_array=bioassembly_dict["atom_array"],
+            cropped_token_array=cropped_token_array,
+            cropped_atom_array=cropped_atom_array,
+            entity_to_sequences=bioassembly_dict["sequences"],
+            selected_indices=selected_indices,
+        )
 
         # Basic info, e.g. dimension related items
         basic_info = {
@@ -677,13 +675,14 @@ class BaseSingleDataset(Dataset):
         spatial_crop_complete_lig: bool = True,
         drop_last: bool = True,
         remove_metal: bool = True,
-    ) -> tuple[str, TokenArray, AtomArray, dict[str, Any], dict[str, Any]]:
+    ) -> tuple[str, TokenArray, AtomArray, dict[str, Any], dict[str, Any], int, np.ndarray]:
         """
         Crops the bioassembly data based on the specified configurations.
 
         Returns:
             A tuple containing the cropping method, cropped token array, cropped atom array,
-                cropped MSA features, and cropped template features.
+                cropped MSA features, cropped template features, reference token index,
+                and cropped token indices in the full token array.
         """
         return DataPipeline.crop(
             one_sample=sample_indice,
@@ -697,6 +696,31 @@ class BaseSingleDataset(Dataset):
             drop_last=drop_last,
             remove_metal=remove_metal,
         )
+
+    def _merge_rna_ss_feature(
+        self,
+        feat: dict[str, Any],
+        full_token_array: TokenArray,
+        full_atom_array: AtomArray,
+        cropped_token_array: TokenArray,
+        cropped_atom_array: AtomArray,
+        entity_to_sequences: Any,
+        selected_indices: np.ndarray,
+    ) -> dict[str, Any]:
+        if self.rna_ss_featurizer is None:
+            return feat
+
+        rna_ss_result = self.rna_ss_featurizer(
+            full_token_array=full_token_array,
+            full_atom_array=full_atom_array,
+            cropped_token_array=cropped_token_array,
+            cropped_atom_array=cropped_atom_array,
+            entity_to_sequences=entity_to_sequences,
+            selected_token_indices=selected_indices,
+        )
+        constraint_feature = feat.setdefault("constraint_feature", {})
+        constraint_feature["substructure"] = rna_ss_result["substructure"]
+        return feat
 
     def _get_sample_indice(self, idx: int) -> pd.Series:
         """
@@ -1239,43 +1263,30 @@ def get_ribonanza_tokenizer(configs):
 # === End RibonanzaNet2 Tokenizer ===
 
 
-# === Secondary Structure (BPP) Featurizer ===
-def get_ss_featurizer(configs) -> Optional[SSFeaturizer]:
-    """Create an SSFeaturizer if secondary_structure is enabled.
-
-    Args:
-        configs: Configuration dict with secondary_structure section.
-
-    Returns:
-        SSFeaturizer instance or None.
-    """
-    ss_info = configs.get("secondary_structure", {})
-    if not ss_info.get("enable", False):
+# === RNA Secondary Structure pair-prior featurizer ===
+def get_rna_ss_featurizer(configs) -> Optional[RNASSFeaturizer]:
+    rna_ss_info = configs.get("rna_ss", {})
+    if not rna_ss_info.get("enable", False):
         return None
 
-    bpp_dir = ss_info.get("bpp_dir", "")
-    index_path = ss_info.get("index_path", "")
-
-    if not bpp_dir or not index_path:
-        logger.warning(
-            "secondary_structure.enable=True but bpp_dir or index_path is empty. "
-            "All RNA chains will get zero SS features."
-        )
-
     logger.info(
-        f"SS featurizer enabled: bpp_dir={bpp_dir}, index_path={index_path}, "
-        f"n_pair_ch={ss_info.get('n_pair_channels', 4)}, "
-        f"n_single_ch={ss_info.get('n_single_channels', 3)}, "
-        f"boundary_margin={ss_info.get('boundary_margin', 10)}"
+        "RNA SS featurizer enabled: "
+        f"sequence_fpath={rna_ss_info.get('sequence_fpath', '')}, "
+        f"feature_dir={rna_ss_info.get('feature_dir', '')}, "
+        f"format={rna_ss_info.get('format', 'sparse_npz')}, "
+        f"n_classes={rna_ss_info.get('n_classes', 6)}, "
+        f"coverage_window={rna_ss_info.get('coverage_window', 8)}"
     )
-    return SSFeaturizer(
-        bpp_dir=bpp_dir,
-        index_path=index_path,
-        n_pair_channels=ss_info.get("n_pair_channels", 4),
-        n_single_channels=ss_info.get("n_single_channels", 3),
-        boundary_margin=ss_info.get("boundary_margin", 10),
+    return RNASSFeaturizer(
+        sequence_fpath=rna_ss_info.get("sequence_fpath", ""),
+        feature_dir=rna_ss_info.get("feature_dir", ""),
+        format=rna_ss_info.get("format", "sparse_npz"),
+        n_classes=rna_ss_info.get("n_classes", 6),
+        coverage_window=rna_ss_info.get("coverage_window", 8),
+        strict=rna_ss_info.get("strict", False),
+        min_prob=rna_ss_info.get("min_prob", 0.0),
     )
-# === End Secondary Structure Featurizer ===
+# === End RNA Secondary Structure featurizer ===
 
 
 class WeightedMultiDataset(Dataset):
@@ -1525,8 +1536,7 @@ def get_datasets(
             "rnalm_separate_dna": configs.get("rnalm", {}).get("separate_dna_projection", False),
             "rna_template_featurizer": get_rna_template_featurizer(configs),  # === RNA Template ===
             "ribonanza_tokenizer": get_ribonanza_tokenizer(configs),  # === RibonanzaNet2 ===
-            "ss_featurizer": get_ss_featurizer(configs),  # === Secondary Structure ===
-            "ss_dropout": configs.get("secondary_structure", {}).get("ss_dropout", 0.0),
+            "rna_ss_featurizer": get_rna_ss_featurizer(configs),  # === RNA SS pair prior ===
             "lig_atom_rename": config_dict.get("lig_atom_rename", False),
             "shuffle_mols": config_dict.get("shuffle_mols", False),
             "shuffle_sym_ids": config_dict.get("shuffle_sym_ids", False),
