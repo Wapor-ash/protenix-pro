@@ -133,6 +133,10 @@ class RNASSFeaturizer:
         if feature_path is None:
             if self.strict:
                 raise KeyError(f"No RNA SS prior path found for sequence '{sequence[:32]}...'")
+            logger.warning(
+                "No RNA SS prior path found for sequence '%s...'; falling back to zeros.",
+                sequence[:32],
+            )
             return None
 
         resolved_path = self._resolve_feature_path(feature_path)
@@ -145,6 +149,74 @@ class RNASSFeaturizer:
         prior = self._load_npz_prior(resolved_path)
         self._cache[sequence] = prior
         return prior
+
+    def _symmetrize_sparse_pairs(
+        self,
+        pair_i: np.ndarray,
+        pair_j: np.ndarray,
+        pair_p: np.ndarray,
+        sequence_length: int,
+        feature_path: str,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        edge_to_prob: dict[tuple[int, int], float] = {}
+        for i, j, p in zip(pair_i.tolist(), pair_j.tolist(), pair_p.tolist()):
+            i = int(i)
+            j = int(j)
+            if i < 0 or j < 0 or i >= sequence_length or j >= sequence_length:
+                raise ValueError(
+                    f"RNA SS sparse prior contains out-of-range indices ({i}, {j}) for length {sequence_length}: {feature_path}"
+                )
+            edge_to_prob[(i, j)] = max(edge_to_prob.get((i, j), 0.0), float(p))
+
+        sym_pair_i = []
+        sym_pair_j = []
+        sym_pair_p = []
+        asymmetry_detected = False
+        visited: set[tuple[int, int]] = set()
+
+        for (i, j), p_ij in edge_to_prob.items():
+            if (i, j) in visited:
+                continue
+            if i == j:
+                sym_pair_i.append(i)
+                sym_pair_j.append(j)
+                sym_pair_p.append(p_ij)
+                visited.add((i, j))
+                continue
+
+            p_ji = edge_to_prob.get((j, i))
+            if p_ji is None:
+                asymmetry_detected = True
+                sym_prob = p_ij
+            else:
+                if not np.isclose(p_ij, p_ji):
+                    asymmetry_detected = True
+                sym_prob = 0.5 * (p_ij + p_ji)
+
+            sym_pair_i.extend([i, j])
+            sym_pair_j.extend([j, i])
+            sym_pair_p.extend([sym_prob, sym_prob])
+            visited.add((i, j))
+            visited.add((j, i))
+
+        if asymmetry_detected:
+            logger.warning(
+                "RNA SS sparse prior '%s' is not explicitly symmetric; auto-symmetrizing pair edges.",
+                feature_path,
+            )
+
+        sym_pair_i_arr = np.asarray(sym_pair_i, dtype=np.int64)
+        sym_pair_j_arr = np.asarray(sym_pair_j, dtype=np.int64)
+        sym_pair_p_arr = np.asarray(sym_pair_p, dtype=np.float32)
+        row_sum = np.zeros(sequence_length, dtype=np.float32)
+        if len(sym_pair_i_arr) > 0:
+            np.add.at(row_sum, sym_pair_i_arr, sym_pair_p_arr)
+        return (
+            sym_pair_i_arr,
+            sym_pair_j_arr,
+            sym_pair_p_arr,
+            np.clip(row_sum, 0.0, 1.0),
+        )
 
     def _load_npz_prior(self, feature_path: str) -> dict[str, np.ndarray]:
         with np.load(feature_path, allow_pickle=False) as data:
@@ -180,17 +252,20 @@ class RNASSFeaturizer:
                     pair_j = pair_j[keep]
                     pair_p = pair_p[keep]
 
-                if "row_sum" in data and self.min_prob <= 0:
-                    row_sum = np.asarray(data["row_sum"], dtype=np.float32)
+                if "length" in data:
+                    seq_len = int(data["length"])
+                elif len(pair_i) > 0:
+                    seq_len = int(max(np.max(pair_i), np.max(pair_j)) + 1)
                 else:
-                    if "length" in data:
-                        seq_len = int(data["length"])
-                    elif len(pair_i) > 0:
-                        seq_len = int(max(np.max(pair_i), np.max(pair_j)) + 1)
-                    else:
-                        seq_len = 0
-                    row_sum = np.zeros(seq_len, dtype=np.float32)
-                    np.add.at(row_sum, pair_i, pair_p)
+                    seq_len = 0
+
+                pair_i, pair_j, pair_p, row_sum = self._symmetrize_sparse_pairs(
+                    pair_i=pair_i,
+                    pair_j=pair_j,
+                    pair_p=pair_p,
+                    sequence_length=seq_len,
+                    feature_path=feature_path,
+                )
 
                 return {
                     "format": "sparse",
@@ -284,6 +359,23 @@ class RNASSFeaturizer:
             if selected_token_indices is None
             else np.asarray(selected_token_indices, dtype=np.int64)
         )
+        if selected_token_indices.ndim != 1:
+            raise ValueError(
+                f"selected_token_indices must be a 1D array, got shape {selected_token_indices.shape}"
+            )
+        if len(selected_token_indices) != len(cropped_token_array):
+            raise ValueError(
+                "selected_token_indices must align 1:1 with cropped_token_array: "
+                f"{len(selected_token_indices)=}, {len(cropped_token_array)=}"
+            )
+        if len(np.unique(selected_token_indices)) != len(selected_token_indices):
+            raise ValueError("selected_token_indices contains duplicate entries")
+        if np.any(selected_token_indices < 0) or np.any(
+            selected_token_indices >= len(full_token_array)
+        ):
+            raise ValueError(
+                "selected_token_indices contains out-of-range values for full_token_array"
+            )
         full_to_crop = {int(full_idx): crop_idx for crop_idx, full_idx in enumerate(selected_token_indices.tolist())}
 
         chain_mol_type = getattr(full_centre_atoms, "chain_mol_type", None)
@@ -322,32 +414,49 @@ class RNASSFeaturizer:
             if prior is None:
                 continue
 
+            prior_length = int(prior["row_sum"].shape[0])
             chain_positions = res_ids[chain_full_token_indices] - 1
             if (
-                len(full_sequence) == len(chain_full_token_indices)
+                prior_length == len(chain_full_token_indices)
                 and (
                     np.any(chain_positions < 0)
-                    or np.any(chain_positions >= len(full_sequence))
+                    or np.any(chain_positions >= prior_length)
                     or len(np.unique(chain_positions)) != len(chain_positions)
                 )
             ):
+                logger.warning(
+                    "RNA SS positions for entity %s chain %s do not match residue numbering; falling back to sequential chain order.",
+                    entity_id,
+                    chain_id,
+                )
                 chain_positions = np.arange(len(chain_full_token_indices), dtype=np.int64)
 
             selected_mask = np.isin(chain_full_token_indices, selected_token_indices)
             crop_full_token_indices = chain_full_token_indices[selected_mask]
             crop_positions = chain_positions[selected_mask]
 
-            valid_mask = (crop_positions >= 0) & (crop_positions < prior["row_sum"].shape[0])
+            valid_mask = (crop_positions >= 0) & (crop_positions < prior_length)
             if not valid_mask.all():
                 if self.strict:
                     raise ValueError(
                         f"RNA SS positions out of range for entity {entity_id}: "
                         f"{crop_positions[~valid_mask].tolist()}"
                     )
+                logger.warning(
+                    "RNA SS positions out of range for entity %s chain %s; dropping %d invalid positions under strict=false.",
+                    entity_id,
+                    chain_id,
+                    int((~valid_mask).sum()),
+                )
                 crop_full_token_indices = crop_full_token_indices[valid_mask]
                 crop_positions = crop_positions[valid_mask]
 
             if len(crop_positions) == 0:
+                logger.warning(
+                    "RNA SS prior for entity %s chain %s resolved to an empty crop; returning zero prior for that chain.",
+                    entity_id,
+                    chain_id,
+                )
                 continue
 
             crop_local_indices = np.asarray(

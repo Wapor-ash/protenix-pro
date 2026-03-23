@@ -432,6 +432,31 @@ class ConstraintEmbedder(nn.Module):
         initialize_method (str): initialize method
     """
 
+    @staticmethod
+    def _resolve_initialize_method(
+        branch_initialize_method: Optional[str],
+        default_initialize_method: str,
+    ) -> str:
+        if branch_initialize_method in (None, "", "inherit"):
+            return default_initialize_method
+        return str(branch_initialize_method)
+
+    @staticmethod
+    def _initialize_linear_modules(
+        module: nn.Module,
+        initialize_method: str,
+    ) -> None:
+        for submodule in module.modules():
+            if isinstance(submodule, nn.Linear):
+                if initialize_method == "zero":
+                    nn.init.zeros_(submodule.weight)
+                elif initialize_method == "kaiming":
+                    nn.init.kaiming_normal_(submodule.weight, nonlinearity="relu")
+                else:
+                    raise ValueError(
+                        f"Unknown constraint initialize_method: {initialize_method}"
+                    )
+
     def __init__(
         self,
         pocket_embedder: dict[str, Any],
@@ -453,18 +478,23 @@ class ConstraintEmbedder(nn.Module):
                 in_features=self.pocket_embedder_config.get("c_z_input", 1),
                 out_features=c_constraint_z,
             )
+            self._initialize_linear_modules(self.pocket_z_embedder, initialize_method)
 
         # token contact embedder
         if self.contact_embedder_config.get("enable", False):
             self.contact_z_embedder = LinearNoBias(
                 in_features=contact_embedder["c_z_input"], out_features=c_constraint_z
             )
+            self._initialize_linear_modules(self.contact_z_embedder, initialize_method)
 
         # atom contact embedder
         if self.contact_atom_embedder_config.get("enable", False):
             self.contact_atom_z_embedder = LinearNoBias(
                 in_features=contact_atom_embedder["c_z_input"],
                 out_features=c_constraint_z,
+            )
+            self._initialize_linear_modules(
+                self.contact_atom_z_embedder, initialize_method
             )
 
         # substructure embedder
@@ -478,6 +508,14 @@ class ConstraintEmbedder(nn.Module):
                 hidden_dim=self.substructure_embedder_config.get("hidden_dim", 256),
                 n_layers=self.substructure_embedder_config.get("n_layers", 3),
             )
+            substructure_initialize_method = self._resolve_initialize_method(
+                self.substructure_embedder_config.get("initialize_method"),
+                initialize_method,
+            )
+            self._initialize_linear_modules(
+                self.substructure_z_embedder,
+                substructure_initialize_method,
+            )
             alpha_init = float(self.substructure_embedder_config.get("alpha_init", 1e-2))
             if alpha_init <= 0:
                 raise ValueError(
@@ -486,17 +524,6 @@ class ConstraintEmbedder(nn.Module):
             self.substructure_log_alpha = nn.Parameter(
                 torch.log(torch.tensor(alpha_init, dtype=torch.float32))
             )
-
-        for module in self.modules():
-            if isinstance(module, nn.Linear):
-                if initialize_method == "zero":
-                    nn.init.zeros_(module.weight)
-                elif initialize_method == "kaiming":
-                    nn.init.kaiming_normal_(module.weight, nonlinearity="relu")
-                else:
-                    raise ValueError(
-                        f"Unknown constraint initialize_method: {initialize_method}"
-                    )
 
     def forward(
         self,

@@ -330,13 +330,13 @@ build_rna_ss_args() {
         --rna_ss.coverage_window "${RNA_SS_COVERAGE_WINDOW}"
         --rna_ss.strict "$(as_bool "${RNA_SS_STRICT}")"
         --rna_ss.min_prob "${RNA_SS_MIN_PROB}"
-        --model.constraint_embedder.initialize_method "${RNA_SS_INIT_METHOD}"
         --model.constraint_embedder.substructure_embedder.enable true
         --model.constraint_embedder.substructure_embedder.n_classes "${RNA_SS_N_CLASSES}"
         --model.constraint_embedder.substructure_embedder.architecture "${RNA_SS_ARCHITECTURE}"
         --model.constraint_embedder.substructure_embedder.hidden_dim "${RNA_SS_HIDDEN_DIM}"
         --model.constraint_embedder.substructure_embedder.n_layers "${RNA_SS_N_LAYERS}"
         --model.constraint_embedder.substructure_embedder.alpha_init "${RNA_SS_ALPHA_INIT}"
+        --model.constraint_embedder.substructure_embedder.initialize_method "${RNA_SS_INIT_METHOD}"
     )
 
     if [ -n "${RNA_SS_SEQUENCE_FPATH}" ]; then

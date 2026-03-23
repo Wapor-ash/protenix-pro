@@ -185,13 +185,14 @@ def build_toy_config(tmpdir: Path) -> object:
     cfg.model.diffusion_module.atom_decoder.n_blocks = 1
     cfg.sample_diffusion.N_step = 1
     cfg.sample_diffusion.N_sample = 1
-    cfg.model.constraint_embedder.initialize_method = "kaiming"
+    cfg.model.constraint_embedder.initialize_method = "zero"
     cfg.model.constraint_embedder.substructure_embedder.enable = True
     cfg.model.constraint_embedder.substructure_embedder.n_classes = 6
     cfg.model.constraint_embedder.substructure_embedder.architecture = "mlp"
     cfg.model.constraint_embedder.substructure_embedder.hidden_dim = 32
     cfg.model.constraint_embedder.substructure_embedder.n_layers = 2
     cfg.model.constraint_embedder.substructure_embedder.alpha_init = 1e-2
+    cfg.model.constraint_embedder.substructure_embedder.initialize_method = "kaiming"
     return cfg
 
 

@@ -370,9 +370,17 @@ class Protenix(nn.Module):
             raise ValueError(
                 "rna_ss.n_classes must match model.constraint_embedder.substructure_embedder.n_classes"
             )
-        if self.configs.model.constraint_embedder.initialize_method == "zero":
+        substructure_initialize_method = substructure_configs.get(
+            "initialize_method",
+            "inherit",
+        )
+        if substructure_initialize_method in (None, "", "inherit"):
+            substructure_initialize_method = (
+                self.configs.model.constraint_embedder.initialize_method
+            )
+        if substructure_initialize_method == "zero":
             raise ValueError(
-                "rna_ss.enable=True requires model.constraint_embedder.initialize_method != 'zero'"
+                "rna_ss.enable=True requires substructure embedder initialize_method != 'zero'"
             )
 
     def reinit_rna_projector_from_protein(self, checkpoint_keys=None) -> str:

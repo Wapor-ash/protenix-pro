@@ -39,6 +39,11 @@ from protenix.utils.metrics import SimpleMetricAggregator
 from protenix.utils.permutation.permutation import SymmetricPermutation
 from protenix.utils.seed import seed_everything
 from protenix.utils.torch_utils import autocasting_disable_decorator, to_device
+from protenix.utils.two_stage_adapter import (
+    collect_required_adapter_param_substrings,
+    parse_adapter_keywords,
+    validate_required_adapter_matches,
+)
 from protenix.utils.training import get_optimizer, is_loss_nan_check
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
@@ -257,27 +262,51 @@ class AF3Trainer(object):
             "rnalm_projection,rna_projection,dna_projection,linear_rnalm,linear_rna_llm,linear_dna_llm,"
             "rnalm_alpha_logit,rnalm_gate_mlp,linear_no_bias_a_rna,rna_template_alpha,rna_template_gate,"
             "layer_weights,projection_sequence_features,projection_pairwise_features,"
-            "gated_sequence_feature_injector,gated_pairwise_feature_injector,ribonanza_pairformer_stack",
+            "gated_sequence_feature_injector,gated_pairwise_feature_injector,ribonanza_pairformer_stack,"
+            "constraint_embedder.substructure_z_embedder,constraint_embedder.substructure_log_alpha",
         )
-        return [k.strip() for k in raw.split(",") if k.strip()]
+        return parse_adapter_keywords(raw)
 
-    def _is_adapter_param(self, name: str) -> bool:
+    def _is_adapter_param(self, name: str, adapter_keywords: list | None = None) -> bool:
         """Check if a parameter name matches any adapter keyword."""
-        return any(kw in name for kw in self._get_adapter_keywords())
+        if adapter_keywords is None:
+            adapter_keywords = self._get_adapter_keywords()
+        return any(kw in name for kw in adapter_keywords)
+
+    def _validate_required_adapter_routing(
+        self,
+        param_names: list[str],
+        adapter_keywords: list[str],
+    ) -> None:
+        required_substrings = collect_required_adapter_param_substrings(self.configs)
+        validate_required_adapter_matches(
+            param_names=param_names,
+            adapter_keywords=adapter_keywords,
+            required_substrings=required_substrings,
+        )
 
     def _split_params(self):
         """Split model params into adapter and backbone groups.
 
         Skips frozen parameters (requires_grad=False), e.g. RibonanzaNet2 backbone.
         """
+        adapter_keywords = self._get_adapter_keywords()
+        named_params = [
+            (name, param)
+            for name, param in self.model.named_parameters()
+            if param.requires_grad
+        ]
+        self._validate_required_adapter_routing(
+            [name for name, _ in named_params],
+            adapter_keywords,
+        )
+
         adapter_params = []
         backbone_params = []
         n_adapter = 0
         n_backbone = 0
-        for name, param in self.model.named_parameters():
-            if not param.requires_grad:
-                continue  # Skip frozen params (e.g. RibonanzaNet2)
-            if self._is_adapter_param(name):
+        for name, param in named_params:
+            if self._is_adapter_param(name, adapter_keywords):
                 adapter_params.append(param)
                 n_adapter += param.numel()
             else:
@@ -345,6 +374,11 @@ class AF3Trainer(object):
             f"backbone={n_backbone/1e6:.2f}M (lr={backbone_lr}), "
             f"keywords={adapter_keywords}"
         )
+        if adapter_lr > 0 and n_adapter == 0:
+            raise RuntimeError(
+                "Per-group LR requested adapter training, but no parameters matched "
+                f"two_stage.adapter_keywords={adapter_keywords}"
+            )
 
         self.optimizer = self._build_optimizer(
             backbone_params, adapter_params, backbone_lr, adapter_lr
@@ -387,6 +421,11 @@ class AF3Trainer(object):
             f"[Stage 1] Adapter warmup: backbone={n_backbone/1e6:.2f}M (lr={stage1_backbone_lr}), "
             f"adapter={n_adapter/1e6:.2f}M (lr={stage1_adapter_lr}), keywords={adapter_keywords}"
         )
+        if stage1_adapter_lr > 0 and n_adapter == 0:
+            raise RuntimeError(
+                "Stage 1 adapter warmup requested adapter training, but no parameters matched "
+                f"two_stage.adapter_keywords={adapter_keywords}"
+            )
 
         # No EMA in Stage 1
         if hasattr(self, "ema_wrapper"):

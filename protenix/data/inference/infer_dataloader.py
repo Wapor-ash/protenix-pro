@@ -301,6 +301,10 @@ class InferenceDataset(Dataset):
                 - An AtomArray object.
                 - A dictionary of time tracking statistics.
         """
+        if self.rna_ss_featurizer is not None and single_sample_dict.get("constraint"):
+            raise NotImplementedError(
+                "v1: RNA SS pair prior is not combined with manual contact/pocket/contact_atom constraints in inference."
+            )
         # general features
         t0 = time.time()
         sample2feat = SampleDictToFeatures(

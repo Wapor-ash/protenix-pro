@@ -366,6 +366,7 @@ model_configs = {
                 "hidden_dim": 128,
                 "n_layers": 1,
                 "alpha_init": 1e-2,
+                "initialize_method": "inherit",  # inherit, zero, kaiming
             },
             "contact_atom_embedder": {
                 "enable": False,
