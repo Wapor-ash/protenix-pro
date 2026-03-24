@@ -188,10 +188,11 @@ class InferenceRunner(object):
         self.model.eval()
         self.print("Finish loading checkpoint.")
 
-        # === Inference projector validation ===
-        # If any projector-based feature (rnalm, rna_llm, dna_llm, rna_template)
-        # is enabled, the corresponding projector weights or a deterministic
-        # post-load repair path must be available.
+        # === Inference feature-weight validation ===
+        # If any feature adds trainable projectors/adapters at finetune time
+        # (rnalm, ribonanza, rna_template, rna_ss), inference must only proceed
+        # when the corresponding weights are present in the checkpoint or a
+        # deterministic post-load repair path is available.
 
         rnalm_configs = self.configs.get("rnalm", {})
         if rnalm_configs.get("enable", False):
@@ -212,6 +213,30 @@ class InferenceRunner(object):
             else:
                 self.print(
                     f"RNA/DNA LM weights found in checkpoint: {rnalm_keys_in_ckpt}"
+                )
+
+        ribonanza_configs = self.configs.get("ribonanzanet2", {})
+        if ribonanza_configs.get("enable", False):
+            ribonanza_keys_in_ckpt = [
+                k for k in ckpt_keys
+                if any(s in k for s in [
+                    "layer_weights",
+                    "projection_sequence_features",
+                    "projection_pairwise_features",
+                    "gated_sequence_feature_injector",
+                    "gated_pairwise_feature_injector",
+                    "ribonanza_pairformer_stack",
+                ])
+            ]
+            if not ribonanza_keys_in_ckpt:
+                raise RuntimeError(
+                    "ribonanzanet2.enable=True but checkpoint contains NO Ribonanza adapter weights. "
+                    "Inference requires a finetuned checkpoint that was trained with ribonanzanet2.enable=True. "
+                    "Either load a proper checkpoint or set ribonanzanet2.enable=false."
+                )
+            else:
+                self.print(
+                    f"Ribonanza adapter weights found in checkpoint: {ribonanza_keys_in_ckpt}"
                 )
 
         if rna_template_configs.get("enable", False):
@@ -257,7 +282,7 @@ class InferenceRunner(object):
                 self.print(
                     f"RNA SS weights found in checkpoint: {rna_ss_keys_in_ckpt}"
                 )
-        # === End inference projector validation ===
+        # === End inference feature-weight validation ===
 
         def count_parameters(model: torch.nn.Module) -> float:
             """Count total parameters in millions."""

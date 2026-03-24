@@ -457,6 +457,25 @@ class ConstraintEmbedder(nn.Module):
                         f"Unknown constraint initialize_method: {initialize_method}"
                     )
 
+    @staticmethod
+    def _zero_init_substructure_output(module: SubstructureEmbedder) -> None:
+        """Zero only the terminal projection so the branch starts at exact zero output.
+
+        Unlike legacy pocket/contact branches, the substructure branch can be a
+        multi-layer MLP or transformer. Zeroing every internal linear layer would
+        make the MLP path effectively dead on step 0. Zeroing only the final
+        projection preserves the user-facing "zero init" semantics while keeping
+        the branch trainable.
+        """
+        if module.architecture == "mlp":
+            nn.init.zeros_(module.network[-1].weight)
+        elif module.architecture == "transformer":
+            nn.init.zeros_(module.output_proj.weight)
+        else:
+            raise ValueError(
+                f"Unsupported SubstructureEmbedder architecture for zero init: {module.architecture}"
+            )
+
     def __init__(
         self,
         pocket_embedder: dict[str, Any],
@@ -512,18 +531,24 @@ class ConstraintEmbedder(nn.Module):
                 self.substructure_embedder_config.get("initialize_method"),
                 initialize_method,
             )
-            self._initialize_linear_modules(
-                self.substructure_z_embedder,
-                substructure_initialize_method,
-            )
-            alpha_init = float(self.substructure_embedder_config.get("alpha_init", 1e-2))
-            if alpha_init <= 0:
-                raise ValueError(
-                    f"substructure_embedder.alpha_init must be positive, got {alpha_init}"
+            self.substructure_use_alpha_gate = substructure_initialize_method != "zero"
+            if substructure_initialize_method == "zero":
+                self._zero_init_substructure_output(self.substructure_z_embedder)
+            else:
+                self._initialize_linear_modules(
+                    self.substructure_z_embedder,
+                    substructure_initialize_method,
                 )
-            self.substructure_log_alpha = nn.Parameter(
-                torch.log(torch.tensor(alpha_init, dtype=torch.float32))
-            )
+                alpha_init = float(
+                    self.substructure_embedder_config.get("alpha_init", 1e-2)
+                )
+                if alpha_init <= 0:
+                    raise ValueError(
+                        f"substructure_embedder.alpha_init must be positive, got {alpha_init}"
+                    )
+                self.substructure_log_alpha = nn.Parameter(
+                    torch.log(torch.tensor(alpha_init, dtype=torch.float32))
+                )
 
     def forward(
         self,
@@ -561,10 +586,12 @@ class ConstraintEmbedder(nn.Module):
 
         # substructure embedder
         if self.substructure_embedder_config.get("enable", False) and "substructure" in constraint_feature_dict:
-            alpha = torch.exp(self.substructure_log_alpha)
-            z_substructure = alpha * self.substructure_z_embedder(
+            z_substructure = self.substructure_z_embedder(
                 constraint_feature_dict["substructure"]
             )
+            if getattr(self, "substructure_use_alpha_gate", False):
+                alpha = torch.exp(self.substructure_log_alpha)
+                z_substructure = alpha * z_substructure
             z_constraint = (
                 z_substructure
                 if z_constraint is None

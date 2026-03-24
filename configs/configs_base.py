@@ -365,7 +365,7 @@ model_configs = {
                 "architecture": "transformer",
                 "hidden_dim": 128,
                 "n_layers": 1,
-                "alpha_init": 1e-2,
+                "alpha_init": 1e-2,  # only used when effective initialize_method != "zero"
                 "initialize_method": "inherit",  # inherit, zero, kaiming
             },
             "contact_atom_embedder": {

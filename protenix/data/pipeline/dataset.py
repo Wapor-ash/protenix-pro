@@ -142,6 +142,9 @@ class BaseSingleDataset(Dataset):
         # === RNA Secondary Structure pair-prior featurizer ===
         self.rna_ss_featurizer = kwargs.get("rna_ss_featurizer", None)
         if self.rna_ss_featurizer is not None and self.constraint.get("enable", False):
+            # Training-side manual constraints are configured as a dataset-level
+            # generator, so v1 blocks the whole dataset up front instead of
+            # discovering the conflict sample-by-sample later in __getitem__.
             raise NotImplementedError(
                 "v1: RNA SS pair prior is not combined with manual contact/pocket constraints in training."
             )

@@ -301,6 +301,8 @@ class InferenceDataset(Dataset):
                 - An AtomArray object.
                 - A dictionary of time tracking statistics.
         """
+        # Inference-side manual constraints come from the per-sample input JSON,
+        # so the same v1 incompatibility is checked at sample granularity.
         if self.rna_ss_featurizer is not None and single_sample_dict.get("constraint"):
             raise NotImplementedError(
                 "v1: RNA SS pair prior is not combined with manual contact/pocket/contact_atom constraints in inference."

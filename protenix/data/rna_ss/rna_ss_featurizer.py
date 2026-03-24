@@ -339,6 +339,27 @@ class RNASSFeaturizer:
             axis=-1,
         ).astype(np.float32)
 
+    @staticmethod
+    def _get_chain_groups(full_centre_atoms: Any) -> np.ndarray:
+        """Return the most specific per-chain grouping available.
+
+        RNA SS priors must never merge symmetric assembly copies into the same
+        chain bucket. Parser-side `unique_chain_and_add_ids()` guarantees
+        `asym_id_int` is unique per assembly chain, while `label_asym_id` may be
+        shared across multiple symmetric copies of the same entity.
+        """
+        chain_group_values = getattr(full_centre_atoms, "asym_id_int", None)
+        if chain_group_values is None:
+            chain_group_values = getattr(full_centre_atoms, "chain_id", None)
+        if chain_group_values is None:
+            chain_group_values = getattr(full_centre_atoms, "label_asym_id", None)
+        if chain_group_values is None:
+            raise AttributeError(
+                "RNA SS featurizer requires one of asym_id_int, chain_id, or label_asym_id "
+                "to group tokens by chain."
+            )
+        return np.asarray(chain_group_values)
+
     def __call__(
         self,
         full_token_array,
@@ -388,19 +409,16 @@ class RNASSFeaturizer:
         if not is_rna.any():
             return {"substructure": torch.from_numpy(substructure)}
 
-        chain_id_values = getattr(full_centre_atoms, "label_asym_id", None)
-        if chain_id_values is None:
-            chain_id_values = getattr(full_centre_atoms, "chain_id")
+        chain_groups = self._get_chain_groups(full_centre_atoms)
         entity_id_values = getattr(full_centre_atoms, "label_entity_id", None)
         if entity_id_values is None:
             entity_id_values = getattr(full_centre_atoms, "entity_id")
 
-        chain_ids = np.asarray(chain_id_values, dtype=object)
         entity_ids = np.asarray(entity_id_values, dtype=object)
         res_ids = np.asarray(getattr(full_centre_atoms, "res_id"), dtype=np.int64)
 
-        for chain_id in np.unique(chain_ids[is_rna]):
-            chain_mask = is_rna & (chain_ids == chain_id)
+        for chain_group in np.unique(chain_groups[is_rna]):
+            chain_mask = is_rna & (chain_groups == chain_group)
             chain_full_token_indices = np.where(chain_mask)[0]
             if len(chain_full_token_indices) == 0:
                 continue
@@ -425,9 +443,9 @@ class RNASSFeaturizer:
                 )
             ):
                 logger.warning(
-                    "RNA SS positions for entity %s chain %s do not match residue numbering; falling back to sequential chain order.",
+                    "RNA SS positions for entity %s chain_group %s do not match residue numbering; falling back to sequential chain order.",
                     entity_id,
-                    chain_id,
+                    chain_group,
                 )
                 chain_positions = np.arange(len(chain_full_token_indices), dtype=np.int64)
 
@@ -443,9 +461,9 @@ class RNASSFeaturizer:
                         f"{crop_positions[~valid_mask].tolist()}"
                     )
                 logger.warning(
-                    "RNA SS positions out of range for entity %s chain %s; dropping %d invalid positions under strict=false.",
+                    "RNA SS positions out of range for entity %s chain_group %s; dropping %d invalid positions under strict=false.",
                     entity_id,
-                    chain_id,
+                    chain_group,
                     int((~valid_mask).sum()),
                 )
                 crop_full_token_indices = crop_full_token_indices[valid_mask]
@@ -453,9 +471,9 @@ class RNASSFeaturizer:
 
             if len(crop_positions) == 0:
                 logger.warning(
-                    "RNA SS prior for entity %s chain %s resolved to an empty crop; returning zero prior for that chain.",
+                    "RNA SS prior for entity %s chain_group %s resolved to an empty crop; returning zero prior for that chain.",
                     entity_id,
-                    chain_id,
+                    chain_group,
                 )
                 continue
 

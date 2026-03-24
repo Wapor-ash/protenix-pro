@@ -378,10 +378,6 @@ class Protenix(nn.Module):
             substructure_initialize_method = (
                 self.configs.model.constraint_embedder.initialize_method
             )
-        if substructure_initialize_method == "zero":
-            raise ValueError(
-                "rna_ss.enable=True requires substructure embedder initialize_method != 'zero'"
-            )
 
     def reinit_rna_projector_from_protein(self, checkpoint_keys=None) -> str:
         """Conditionally re-initialize the RNA projector after checkpoint loading.

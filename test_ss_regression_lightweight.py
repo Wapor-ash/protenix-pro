@@ -15,6 +15,7 @@ from protenix.model.modules.embedders import ConstraintEmbedder
 from protenix.utils.two_stage_adapter import (
     RNA_SS_REQUIRED_ADAPTER_SUBSTRINGS,
     parse_adapter_keywords,
+    collect_required_adapter_param_substrings,
     validate_required_adapter_matches,
 )
 
@@ -168,8 +169,63 @@ def test_alignment_fallback_uses_prior_length():
         )
 
 
+def test_symmetric_copies_do_not_share_chain_groups():
+    print_section("Test 3: Symmetric Assembly Copies Stay Isolated")
+    sequence = "AUGC"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+        prior_path = tmpdir / "dense_copy_isolation.npz"
+        bpp = np.zeros((4, 4), dtype=np.float32)
+        bpp[0, 3] = bpp[3, 0] = 0.8
+        np.savez(prior_path, bpp=bpp)
+        index_path = tmpdir / "sequence_to_prior.csv"
+        write_sequence_index(index_path, sequence, prior_path.name)
+
+        featurizer = RNASSFeaturizer(
+            sequence_fpath=str(index_path),
+            feature_dir=str(tmpdir),
+            format="dense_npz",
+            strict=True,
+        )
+        full_sequence = sequence * 2
+        full_tokens = FakeTokenArray(np.arange(8), [RNA_VALUES[c] for c in full_sequence])
+        full_atoms = FakeAtomArray(
+            chain_mol_type=["rna"] * 8,
+            asym_id_int=[0, 0, 0, 0, 1, 1, 1, 1],
+            label_asym_id=["A"] * 8,
+            label_entity_id=["1"] * 8,
+            res_id=[1, 2, 3, 4, 1, 2, 3, 4],
+            chain_id=["A", "A", "A", "A", "A.1", "A.1", "A.1", "A.1"],
+            entity_id=["1"] * 8,
+            mol_type=["rna"] * 8,
+        )
+        selected = np.asarray([0, 7], dtype=np.int64)
+        result = featurizer(
+            full_token_array=full_tokens,
+            full_atom_array=full_atoms,
+            cropped_token_array=full_tokens[selected],
+            cropped_atom_array=full_atoms[selected],
+            entity_to_sequences={"1": sequence},
+            selected_token_indices=selected,
+        )
+        substructure = result["substructure"].numpy()
+
+        check(
+            np.isclose(substructure[0, 1, 0], 0.0),
+            f"Cross-copy P_in stays zero: {substructure[0, 1, 0]:.3f}",
+        )
+        check(
+            np.isclose(substructure[0, 1, 5], 0.0) and np.isclose(substructure[1, 0, 5], 0.0),
+            "Cross-copy valid mask stays zero across symmetric copies",
+        )
+        check(
+            np.isclose(substructure[0, 0, 5], 1.0) and np.isclose(substructure[1, 1, 5], 1.0),
+            "Each copy still keeps its own same-chain diagonal validity",
+        )
+
+
 def test_constraint_embedder_supports_branch_specific_init():
-    print_section("Test 3: ConstraintEmbedder Supports Branch-Specific Init")
+    print_section("Test 4: ConstraintEmbedder Supports Branch-Specific Init")
     embedder = ConstraintEmbedder(
         pocket_embedder={"enable": True, "c_z_input": 1},
         contact_embedder={"enable": False, "c_z_input": 2},
@@ -200,8 +256,45 @@ def test_constraint_embedder_supports_branch_specific_init():
     )
 
 
+def test_constraint_embedder_zero_init_skips_alpha_and_starts_zero():
+    print_section("Test 5: ConstraintEmbedder Zero Init Skips Alpha Gate")
+    embedder = ConstraintEmbedder(
+        pocket_embedder={"enable": False, "c_z_input": 1},
+        contact_embedder={"enable": False, "c_z_input": 2},
+        contact_atom_embedder={"enable": False, "c_z_input": 2},
+        substructure_embedder={
+            "enable": True,
+            "n_classes": 6,
+            "architecture": "mlp",
+            "hidden_dim": 16,
+            "n_layers": 3,
+            "initialize_method": "zero",
+            "alpha_init": 1e-2,
+        },
+        c_constraint_z=8,
+        initialize_method="zero",
+    )
+
+    substructure = torch.randn(4, 4, 6)
+    output = embedder({"substructure": substructure})
+    final_weight = embedder.substructure_z_embedder.network[-1].weight.detach().cpu()
+
+    check(
+        not hasattr(embedder, "substructure_log_alpha"),
+        "Zero-init substructure branch does not create substructure_log_alpha",
+    )
+    check(
+        torch.allclose(final_weight, torch.zeros_like(final_weight)),
+        "Zero-init substructure branch zeroes the terminal projection",
+    )
+    check(
+        torch.allclose(output, torch.zeros_like(output)),
+        "Zero-init substructure branch starts with exact zero output",
+    )
+
+
 def test_required_adapter_validation_catches_missing_rna_ss_keywords():
-    print_section("Test 4: Adapter Validation Catches Missing RNA SS Keywords")
+    print_section("Test 6: Adapter Validation Catches Missing RNA SS Keywords")
     param_names = [
         "constraint_embedder.substructure_z_embedder.network.0.weight",
         "constraint_embedder.substructure_log_alpha",
@@ -228,12 +321,43 @@ def test_required_adapter_validation_catches_missing_rna_ss_keywords():
     check(True, "Validation accepts adapter keywords that cover RNA SS params")
 
 
+def test_required_adapter_validation_skips_alpha_for_zero_init():
+    print_section("Test 7: Zero Init Adapter Validation Skips Alpha Requirement")
+    config = {
+        "rna_ss": {"enable": True},
+        "model": {
+            "constraint_embedder": {
+                "initialize_method": "zero",
+                "substructure_embedder": {
+                    "enable": True,
+                    "initialize_method": "zero",
+                },
+            }
+        },
+    }
+    required_substrings = collect_required_adapter_param_substrings(config)
+    check(
+        required_substrings == ["constraint_embedder.substructure_z_embedder"],
+        f"Zero-init required adapter params shrink to substructure embedder only: {required_substrings}",
+    )
+
+    validate_required_adapter_matches(
+        param_names=["constraint_embedder.substructure_z_embedder.network.0.weight"],
+        adapter_keywords=parse_adapter_keywords("constraint_embedder.substructure_z_embedder"),
+        required_substrings=required_substrings,
+    )
+    check(True, "Zero-init adapter validation no longer requires substructure_log_alpha")
+
+
 def main():
     tests = [
         test_sparse_prior_auto_symmetrizes,
         test_alignment_fallback_uses_prior_length,
+        test_symmetric_copies_do_not_share_chain_groups,
         test_constraint_embedder_supports_branch_specific_init,
+        test_constraint_embedder_zero_init_skips_alpha_and_starts_zero,
         test_required_adapter_validation_catches_missing_rna_ss_keywords,
+        test_required_adapter_validation_skips_alpha_for_zero_init,
     ]
 
     for test_fn in tests:
