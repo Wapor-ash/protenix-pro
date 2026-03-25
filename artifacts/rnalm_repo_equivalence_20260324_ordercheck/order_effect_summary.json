@@ -1,0 +1,16 @@
+{
+  "1idv_A::rnalm_off": {
+    "pro_first": {
+      "pro_forward_avg_s": 0.1152720528521708,
+      "new_forward_avg_s": 0.11149671088371958,
+      "delta_s_pro_minus_new": 0.0037753419684512235
+    }
+  },
+  "165d_A::rnalm_on_diffusion": {
+    "pro_first": {
+      "pro_forward_avg_s": 0.16347455206726277,
+      "new_forward_avg_s": 0.16202438942023686,
+      "delta_s_pro_minus_new": 0.00145016264702591
+    }
+  }
+}

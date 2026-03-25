@@ -1,0 +1,1046 @@
+{
+  "repo_tag": "protenix_pro",
+  "repo_dir": "/inspire/ssd/project/sais-bio/public/ash_proj/code/protenix_pro/Protenix",
+  "sample": {
+    "tag": "rna_157d_A",
+    "pdb_id": "157d",
+    "chain_1_id": "A",
+    "type": "chain"
+  },
+  "rnalm_enabled": true,
+  "device": "cuda:0",
+  "gpu_name": "NVIDIA H800",
+  "torch_version": "2.7.1+cu126",
+  "python_executable": "/inspire/ssd/project/sais-bio/public/ash_proj/conda/envs/tune_protenix/bin/python",
+  "checkpoint_path": "/inspire/ssd/project/sais-bio/public/ash_proj/code/protenix_pro/Protenix/checkpoints/protenix_base_20250630_v1.0.0.pt",
+  "selected_row": {
+    "entity_1_id": 1,
+    "chain_1_id": "A",
+    "mol_1_type": "nuc",
+    "cluster_1_id": "CGCGAAUUAGCG",
+    "entity_2_id": NaN,
+    "chain_2_id": NaN,
+    "mol_2_type": NaN,
+    "cluster_2_id": NaN,
+    "cluster_id": "CGCGAAUUAGCG",
+    "pdb_id": "157d",
+    "assembly_id": 1,
+    "release_date": "1994-05-31",
+    "num_tokens": 24,
+    "num_prot_chains": 0,
+    "resolution": 1.8,
+    "type": "chain",
+    "mol_type_group": "intra_nuc",
+    "sub_mol_1_type": "rna",
+    "sub_mol_2_type": NaN,
+    "eval_type": "intra_rna"
+  },
+  "timings": {
+    "dataset_init_s": 0.42338836938142776,
+    "dataset_item_load_s": 1.1025914903730154,
+    "model_init_s": 25.406793294474483,
+    "checkpoint_load_s": 0.15632751770317554,
+    "pairformer_s": 2.0601620096713305,
+    "forward_single_s": 0.31525719352066517,
+    "forward_avg_s": 0.08468111604452133,
+    "forward_std_s": 0.0
+  },
+  "memory": {
+    "pairformer_peak_mb": 181.24169921875,
+    "forward_peak_mb": 213.755859375
+  },
+  "basic": {
+    "pdb_id": "157d",
+    "N_asym": 2,
+    "N_token": 24,
+    "N_atom": 518,
+    "N_msa": 2,
+    "bioassembly_dict_fpath": "/inspire/ssd/project/sais-bio/public/ash_proj/data/stanford-rna-3d-folding/part2/protenix_prepared/rna_bioassembly/157d.pkl.gz",
+    "N_msa_prot_pair": 1,
+    "N_msa_prot_unpair": 1,
+    "N_msa_rna_pair": 1,
+    "N_msa_rna_unpair": 1,
+    "N_prot_atom": 0,
+    "N_prot_token": 0,
+    "N_lig_atom": 0,
+    "N_lig_token": 0,
+    "N_rna_atom": 518,
+    "N_rna_token": 24,
+    "N_dna_atom": 0,
+    "N_dna_token": 0,
+    "chain_id": [
+      "A",
+      "B"
+    ]
+  },
+  "tensor_summary": {
+    "raw_input_feature_dict": {
+      "asym_id": {
+        "shape": [
+          24
+        ],
+        "dtype": "torch.int64",
+        "numel": 24
+      },
+      "atom_to_tokatom_idx": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "atom_to_token_idx": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "bond_mask": {
+        "shape": [
+          518,
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 268324
+      },
+      "deletion_mean": {
+        "shape": [
+          24
+        ],
+        "dtype": "torch.float32",
+        "numel": 24
+      },
+      "deletion_value": {
+        "shape": [
+          2,
+          24
+        ],
+        "dtype": "torch.float32",
+        "numel": 48
+      },
+      "distogram_rep_atom_mask": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "entity_id": {
+        "shape": [
+          24
+        ],
+        "dtype": "torch.int64",
+        "numel": 24
+      },
+      "entity_mol_id": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "frame_atom_index": {
+        "shape": [
+          24,
+          3
+        ],
+        "dtype": "torch.int64",
+        "numel": 72
+      },
+      "has_deletion": {
+        "shape": [
+          2,
+          24
+        ],
+        "dtype": "torch.float32",
+        "numel": 48
+      },
+      "has_frame": {
+        "shape": [
+          24
+        ],
+        "dtype": "torch.int64",
+        "numel": 24
+      },
+      "is_distillation": {
+        "shape": [
+          1
+        ],
+        "dtype": "torch.bool",
+        "numel": 1
+      },
+      "is_dna": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "is_ligand": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "is_protein": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "is_rna": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "modified_res_mask": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "mol_atom_index": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "mol_id": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "msa": {
+        "shape": [
+          2,
+          24
+        ],
+        "dtype": "torch.int64",
+        "numel": 48
+      },
+      "pae_rep_atom_mask": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "plddt_m_rep_atom_mask": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "profile": {
+        "shape": [
+          24,
+          32
+        ],
+        "dtype": "torch.float32",
+        "numel": 768
+      },
+      "prot_pair_num_alignments": {
+        "shape": [],
+        "dtype": "torch.int64",
+        "numel": 1
+      },
+      "prot_unpair_num_alignments": {
+        "shape": [],
+        "dtype": "torch.int64",
+        "numel": 1
+      },
+      "ref_atom_name_chars": {
+        "shape": [
+          518,
+          4,
+          64
+        ],
+        "dtype": "torch.int64",
+        "numel": 132608
+      },
+      "ref_charge": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "ref_element": {
+        "shape": [
+          518,
+          128
+        ],
+        "dtype": "torch.int64",
+        "numel": 66304
+      },
+      "ref_mask": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "ref_pos": {
+        "shape": [
+          518,
+          3
+        ],
+        "dtype": "torch.float32",
+        "numel": 1554
+      },
+      "ref_space_uid": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "residue_index": {
+        "shape": [
+          24
+        ],
+        "dtype": "torch.int64",
+        "numel": 24
+      },
+      "resolution": {
+        "shape": [
+          1
+        ],
+        "dtype": "torch.float32",
+        "numel": 1
+      },
+      "restype": {
+        "shape": [
+          24,
+          32
+        ],
+        "dtype": "torch.float32",
+        "numel": 768
+      },
+      "rna_pair_num_alignments": {
+        "shape": [],
+        "dtype": "torch.int64",
+        "numel": 1
+      },
+      "rna_unpair_num_alignments": {
+        "shape": [],
+        "dtype": "torch.int64",
+        "numel": 1
+      },
+      "rnalm_token_embedding": {
+        "shape": [
+          24,
+          2048
+        ],
+        "dtype": "torch.float32",
+        "numel": 49152
+      },
+      "sym_id": {
+        "shape": [
+          24
+        ],
+        "dtype": "torch.int64",
+        "numel": 24
+      },
+      "template_aatype": {
+        "shape": [
+          4,
+          24
+        ],
+        "dtype": "torch.int64",
+        "numel": 96
+      },
+      "template_atom_mask": {
+        "shape": [
+          4,
+          24,
+          24
+        ],
+        "dtype": "torch.bool",
+        "numel": 2304
+      },
+      "template_atom_positions": {
+        "shape": [
+          4,
+          24,
+          24,
+          3
+        ],
+        "dtype": "torch.float32",
+        "numel": 6912
+      },
+      "template_backbone_frame_mask": {
+        "shape": [
+          4,
+          24,
+          24
+        ],
+        "dtype": "torch.float32",
+        "numel": 2304
+      },
+      "template_distogram": {
+        "shape": [
+          4,
+          24,
+          24,
+          39
+        ],
+        "dtype": "torch.float32",
+        "numel": 89856
+      },
+      "template_pseudo_beta_mask": {
+        "shape": [
+          4,
+          24,
+          24
+        ],
+        "dtype": "torch.float32",
+        "numel": 2304
+      },
+      "template_unit_vector": {
+        "shape": [
+          4,
+          24,
+          24,
+          3
+        ],
+        "dtype": "torch.float32",
+        "numel": 6912
+      },
+      "token_bonds": {
+        "shape": [
+          24,
+          24
+        ],
+        "dtype": "torch.float32",
+        "numel": 576
+      },
+      "token_index": {
+        "shape": [
+          24
+        ],
+        "dtype": "torch.int64",
+        "numel": 24
+      }
+    },
+    "prepared_input_feature_dict": {
+      "asym_id": {
+        "shape": [
+          24
+        ],
+        "dtype": "torch.int64",
+        "numel": 24
+      },
+      "atom_to_tokatom_idx": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "atom_to_token_idx": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "bond_mask": {
+        "shape": [
+          518,
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 268324
+      },
+      "d_lm": {
+        "shape": [
+          17,
+          32,
+          128,
+          3
+        ],
+        "dtype": "torch.float32",
+        "numel": 208896
+      },
+      "deletion_mean": {
+        "shape": [
+          24
+        ],
+        "dtype": "torch.float32",
+        "numel": 24
+      },
+      "deletion_value": {
+        "shape": [
+          2,
+          24
+        ],
+        "dtype": "torch.float32",
+        "numel": 48
+      },
+      "distogram_rep_atom_mask": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "entity_id": {
+        "shape": [
+          24
+        ],
+        "dtype": "torch.int64",
+        "numel": 24
+      },
+      "entity_mol_id": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "frame_atom_index": {
+        "shape": [
+          24,
+          3
+        ],
+        "dtype": "torch.int64",
+        "numel": 72
+      },
+      "has_deletion": {
+        "shape": [
+          2,
+          24
+        ],
+        "dtype": "torch.float32",
+        "numel": 48
+      },
+      "has_frame": {
+        "shape": [
+          24
+        ],
+        "dtype": "torch.int64",
+        "numel": 24
+      },
+      "is_distillation": {
+        "shape": [
+          1
+        ],
+        "dtype": "torch.bool",
+        "numel": 1
+      },
+      "is_dna": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "is_ligand": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "is_protein": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "is_rna": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "modified_res_mask": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "mol_atom_index": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "mol_id": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "msa": {
+        "shape": [
+          2,
+          24
+        ],
+        "dtype": "torch.int64",
+        "numel": 48
+      },
+      "pad_info.mask_trunked": {
+        "shape": [
+          17,
+          32,
+          128
+        ],
+        "dtype": "torch.bool",
+        "numel": 69632
+      },
+      "pae_rep_atom_mask": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "plddt_m_rep_atom_mask": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "profile": {
+        "shape": [
+          24,
+          32
+        ],
+        "dtype": "torch.float32",
+        "numel": 768
+      },
+      "prot_pair_num_alignments": {
+        "shape": [],
+        "dtype": "torch.int64",
+        "numel": 1
+      },
+      "prot_unpair_num_alignments": {
+        "shape": [],
+        "dtype": "torch.int64",
+        "numel": 1
+      },
+      "ref_atom_name_chars": {
+        "shape": [
+          518,
+          4,
+          64
+        ],
+        "dtype": "torch.int64",
+        "numel": 132608
+      },
+      "ref_charge": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "ref_element": {
+        "shape": [
+          518,
+          128
+        ],
+        "dtype": "torch.int64",
+        "numel": 66304
+      },
+      "ref_mask": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "ref_pos": {
+        "shape": [
+          518,
+          3
+        ],
+        "dtype": "torch.float32",
+        "numel": 1554
+      },
+      "ref_space_uid": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "relp": {
+        "shape": [
+          24,
+          24,
+          139
+        ],
+        "dtype": "torch.float32",
+        "numel": 80064
+      },
+      "residue_index": {
+        "shape": [
+          24
+        ],
+        "dtype": "torch.int64",
+        "numel": 24
+      },
+      "resolution": {
+        "shape": [
+          1
+        ],
+        "dtype": "torch.float32",
+        "numel": 1
+      },
+      "restype": {
+        "shape": [
+          24,
+          32
+        ],
+        "dtype": "torch.float32",
+        "numel": 768
+      },
+      "rna_pair_num_alignments": {
+        "shape": [],
+        "dtype": "torch.int64",
+        "numel": 1
+      },
+      "rna_unpair_num_alignments": {
+        "shape": [],
+        "dtype": "torch.int64",
+        "numel": 1
+      },
+      "rnalm_token_embedding": {
+        "shape": [
+          24,
+          2048
+        ],
+        "dtype": "torch.float32",
+        "numel": 49152
+      },
+      "sym_id": {
+        "shape": [
+          24
+        ],
+        "dtype": "torch.int64",
+        "numel": 24
+      },
+      "template_aatype": {
+        "shape": [
+          4,
+          24
+        ],
+        "dtype": "torch.int64",
+        "numel": 96
+      },
+      "template_atom_mask": {
+        "shape": [
+          4,
+          24,
+          24
+        ],
+        "dtype": "torch.bool",
+        "numel": 2304
+      },
+      "template_atom_positions": {
+        "shape": [
+          4,
+          24,
+          24,
+          3
+        ],
+        "dtype": "torch.float32",
+        "numel": 6912
+      },
+      "template_backbone_frame_mask": {
+        "shape": [
+          4,
+          24,
+          24
+        ],
+        "dtype": "torch.float32",
+        "numel": 2304
+      },
+      "template_distogram": {
+        "shape": [
+          4,
+          24,
+          24,
+          39
+        ],
+        "dtype": "torch.float32",
+        "numel": 89856
+      },
+      "template_pseudo_beta_mask": {
+        "shape": [
+          4,
+          24,
+          24
+        ],
+        "dtype": "torch.float32",
+        "numel": 2304
+      },
+      "template_unit_vector": {
+        "shape": [
+          4,
+          24,
+          24,
+          3
+        ],
+        "dtype": "torch.float32",
+        "numel": 6912
+      },
+      "token_bonds": {
+        "shape": [
+          24,
+          24
+        ],
+        "dtype": "torch.float32",
+        "numel": 576
+      },
+      "token_index": {
+        "shape": [
+          24
+        ],
+        "dtype": "torch.int64",
+        "numel": 24
+      },
+      "v_lm": {
+        "shape": [
+          17,
+          32,
+          128,
+          1
+        ],
+        "dtype": "torch.bool",
+        "numel": 69632
+      }
+    },
+    "label_dict": {
+      "coordinate": {
+        "shape": [
+          518,
+          3
+        ],
+        "dtype": "torch.float32",
+        "numel": 1554
+      },
+      "coordinate_mask": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      }
+    },
+    "label_full_dict": {
+      "coordinate": {
+        "shape": [
+          518,
+          3
+        ],
+        "dtype": "torch.float32",
+        "numel": 1554
+      },
+      "coordinate_mask": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "entity_mol_id": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "mol_atom_index": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "mol_id": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      },
+      "pae_rep_atom_mask": {
+        "shape": [
+          518
+        ],
+        "dtype": "torch.int64",
+        "numel": 518
+      }
+    },
+    "pairformer": {
+      "s_inputs": {
+        "shape": [
+          24,
+          449
+        ],
+        "dtype": "torch.float32",
+        "numel": 10776
+      },
+      "s_rnalm": {
+        "shape": [
+          24,
+          384
+        ],
+        "dtype": "torch.float32",
+        "numel": 9216
+      },
+      "s_trunk": {
+        "shape": [
+          24,
+          384
+        ],
+        "dtype": "torch.float32",
+        "numel": 9216
+      },
+      "z_trunk": {
+        "shape": [
+          24,
+          24,
+          128
+        ],
+        "dtype": "torch.float32",
+        "numel": 73728
+      }
+    },
+    "prediction": {
+      "contact_probs": {
+        "shape": [
+          24,
+          24
+        ],
+        "dtype": "torch.float32",
+        "numel": 576
+      },
+      "coordinate": {
+        "shape": [
+          1,
+          518,
+          3
+        ],
+        "dtype": "torch.float32",
+        "numel": 1554
+      },
+      "pae": {
+        "shape": [
+          1,
+          24,
+          24,
+          64
+        ],
+        "dtype": "torch.float32",
+        "numel": 36864
+      },
+      "pde": {
+        "shape": [
+          1,
+          24,
+          24,
+          64
+        ],
+        "dtype": "torch.float32",
+        "numel": 36864
+      },
+      "plddt": {
+        "shape": [
+          1,
+          518,
+          50
+        ],
+        "dtype": "torch.float32",
+        "numel": 25900
+      },
+      "resolved": {
+        "shape": [
+          1,
+          518,
+          2
+        ],
+        "dtype": "torch.float32",
+        "numel": 1036
+      }
+    }
+  },
+  "checkpoint_load": {
+    "missing_keys": [
+      "rnalm_projection.weight"
+    ],
+    "unexpected_keys_count": 3669,
+    "unexpected_keys_head": [
+      "confidence_head.pairformer_stack.blocks.1.attention_pair_bias.attention.linear_g.weight",
+      "confidence_head.pairformer_stack.blocks.1.attention_pair_bias.attention.linear_k.weight",
+      "confidence_head.pairformer_stack.blocks.1.attention_pair_bias.attention.linear_o.weight",
+      "confidence_head.pairformer_stack.blocks.1.attention_pair_bias.attention.linear_q.bias",
+      "confidence_head.pairformer_stack.blocks.1.attention_pair_bias.attention.linear_q.weight",
+      "confidence_head.pairformer_stack.blocks.1.attention_pair_bias.attention.linear_v.weight",
+      "confidence_head.pairformer_stack.blocks.1.attention_pair_bias.layernorm_a.bias",
+      "confidence_head.pairformer_stack.blocks.1.attention_pair_bias.layernorm_a.weight",
+      "confidence_head.pairformer_stack.blocks.1.attention_pair_bias.layernorm_z.bias",
+      "confidence_head.pairformer_stack.blocks.1.attention_pair_bias.layernorm_z.weight",
+      "confidence_head.pairformer_stack.blocks.1.attention_pair_bias.linear_nobias_z.weight",
+      "confidence_head.pairformer_stack.blocks.1.pair_transition.layernorm1.bias",
+      "confidence_head.pairformer_stack.blocks.1.pair_transition.layernorm1.weight",
+      "confidence_head.pairformer_stack.blocks.1.pair_transition.linear_no_bias.weight",
+      "confidence_head.pairformer_stack.blocks.1.pair_transition.linear_no_bias_a.weight",
+      "confidence_head.pairformer_stack.blocks.1.pair_transition.linear_no_bias_b.weight",
+      "confidence_head.pairformer_stack.blocks.1.single_transition.layernorm1.bias",
+      "confidence_head.pairformer_stack.blocks.1.single_transition.layernorm1.weight",
+      "confidence_head.pairformer_stack.blocks.1.single_transition.linear_no_bias.weight",
+      "confidence_head.pairformer_stack.blocks.1.single_transition.linear_no_bias_a.weight"
+    ],
+    "unexpected_keys_sha256": "d45d2d739a42b5dd2aa62a7ba2bf785d05a1358b4dd5f9ad2e044203b93d54a5"
+  },
+  "rnalm_param_stats_pre": {
+    "rnalm_projection.weight": {
+      "shape": [
+        384,
+        2048
+      ],
+      "sum": 0.0,
+      "absmax": 0.0
+    }
+  },
+  "rnalm_param_stats_post": {
+    "rnalm_projection.weight": {
+      "shape": [
+        384,
+        2048
+      ],
+      "sum": 0.0,
+      "absmax": 0.0
+    }
+  },
+  "log_dict": {
+    "time": {
+      "pairformer": 0.03501105308532715,
+      "diffusion": 0.1523151397705078,
+      "confidence": 0.021757125854492188,
+      "model_forward": 0.2090895175933838
+    }
+  },
+  "payload_path": "/inspire/ssd/project/sais-bio/public/ash_proj/code/protenix_pro/Protenix/artifacts/rnalm_repo_equivalence_20260324/protenix_pro/rna_157d_A/rnalm_on_diffusion/payload.pt"
+}

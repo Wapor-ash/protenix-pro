@@ -1,0 +1,38 @@
+{
+  "protenix_new::1idv_A::rnalm_off": {
+    "pairformer_exact_same": false,
+    "pairformer_max_abs_diff": 0.0003662109375,
+    "prediction_exact_same": false,
+    "prediction_max_abs_diff": 0.0009765625,
+    "raw_exact_same": true,
+    "prepared_exact_same": true,
+    "forward_mean_delta_s": -0.005175357684493065
+  },
+  "protenix_pro::1idv_A::rnalm_off": {
+    "pairformer_exact_same": false,
+    "pairformer_max_abs_diff": 0.000244140625,
+    "prediction_exact_same": false,
+    "prediction_max_abs_diff": 0.00146484375,
+    "raw_exact_same": true,
+    "prepared_exact_same": true,
+    "forward_mean_delta_s": 0.08031226570407549
+  },
+  "protenix_new::165d_A::rnalm_on_diffusion": {
+    "pairformer_exact_same": false,
+    "pairformer_max_abs_diff": 0.00048828125,
+    "prediction_exact_same": false,
+    "prediction_max_abs_diff": 0.006799221038818359,
+    "raw_exact_same": true,
+    "prepared_exact_same": true,
+    "forward_mean_delta_s": -0.07727266537646454
+  },
+  "protenix_pro::165d_A::rnalm_on_diffusion": {
+    "pairformer_exact_same": false,
+    "pairformer_max_abs_diff": 0.00048828125,
+    "prediction_exact_same": false,
+    "prediction_max_abs_diff": 0.0026865005493164062,
+    "raw_exact_same": true,
+    "prepared_exact_same": true,
+    "forward_mean_delta_s": 0.013983928288022668
+  }
+}

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import random
@@ -241,6 +242,7 @@ def write_sample_index_csv(
 def build_child_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--child", action="store_true")
+    parser.add_argument("--benchmark", action="store_true")
     parser.add_argument("--repo-tag")
     parser.add_argument("--repo-dir")
     parser.add_argument("--sample-tag")
@@ -249,6 +251,10 @@ def build_child_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sample-type", default="chain")
     parser.add_argument("--rnalm-enabled", choices=["true", "false"])
     parser.add_argument("--output-dir")
+    parser.add_argument("--benchmark-warmup", type=int, default=0)
+    parser.add_argument("--benchmark-repeats", type=int, default=1)
+    parser.add_argument("--benchmark-sample-tag", default="rna_157d_A")
+    parser.add_argument("--benchmark-mode-tag", default="rnalm_off")
     return parser
 
 
@@ -497,12 +503,30 @@ def child_main(args: argparse.Namespace) -> None:
             timings["forward_single_s"] = time.perf_counter() - t0
         peak_forward_mb = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
 
-        perf_runs: list[float] = []
-        for rep in range(1):
+        perf_warmup = max(0, int(args.benchmark_warmup))
+        perf_repeats = max(1, int(args.benchmark_repeats))
+
+        for rep in range(perf_warmup):
             perf_input = to_device(clone_for_model(raw_input), device)
             perf_label = to_device(clone_for_model(raw_label), device)
             perf_label_full = to_device(clone_for_model(raw_label_full), device)
-            set_global_seed(20260324 + rep)
+            set_global_seed(303000 + rep)
+            with torch.no_grad():
+                _ = model(
+                    input_feature_dict=perf_input,
+                    label_full_dict=perf_label_full,
+                    label_dict=perf_label,
+                    mode="inference",
+                    mc_dropout_apply_rate=0.0,
+                )
+                torch.cuda.synchronize(device)
+
+        perf_runs: list[float] = []
+        for rep in range(perf_repeats):
+            perf_input = to_device(clone_for_model(raw_input), device)
+            perf_label = to_device(clone_for_model(raw_label), device)
+            perf_label_full = to_device(clone_for_model(raw_label_full), device)
+            set_global_seed(404000 + rep)
             with torch.no_grad():
                 torch.cuda.synchronize(device)
                 t0 = time.perf_counter()
@@ -515,8 +539,14 @@ def child_main(args: argparse.Namespace) -> None:
                 )
                 torch.cuda.synchronize(device)
                 perf_runs.append(time.perf_counter() - t0)
-        timings["forward_avg_s"] = float(sum(perf_runs) / len(perf_runs))
-        timings["forward_std_s"] = float(np.std(np.asarray(perf_runs, dtype=np.float64)))
+        perf_arr = np.asarray(perf_runs, dtype=np.float64)
+        timings["forward_avg_s"] = float(perf_arr.mean())
+        timings["forward_std_s"] = float(perf_arr.std())
+        timings["forward_median_s"] = float(np.median(perf_arr))
+        timings["forward_min_s"] = float(perf_arr.min())
+        timings["forward_max_s"] = float(perf_arr.max())
+        timings["forward_p05_s"] = float(np.percentile(perf_arr, 5))
+        timings["forward_p95_s"] = float(np.percentile(perf_arr, 95))
 
         payload = {
             "raw_input_feature_dict": clone_for_save(raw_input),
@@ -552,6 +582,11 @@ def child_main(args: argparse.Namespace) -> None:
             "checkpoint_path": str(checkpoint_path),
             "selected_row": selected_row,
             "timings": timings,
+            "benchmark": {
+                "warmup_runs": perf_warmup,
+                "repeats": perf_repeats,
+                "forward_runs_s": perf_runs,
+            },
             "memory": {
                 "pairformer_peak_mb": peak_pairformer_mb,
                 "forward_peak_mb": peak_forward_mb,
@@ -574,7 +609,11 @@ def child_main(args: argparse.Namespace) -> None:
             },
             "checkpoint_load": {
                 "missing_keys": sorted(load_result.missing_keys),
-                "unexpected_keys": sorted(load_result.unexpected_keys),
+                "unexpected_keys_count": len(load_result.unexpected_keys),
+                "unexpected_keys_head": sorted(load_result.unexpected_keys)[:20],
+                "unexpected_keys_sha256": hashlib.sha256(
+                    "\n".join(sorted(load_result.unexpected_keys)).encode("utf-8")
+                ).hexdigest(),
             },
             "rnalm_param_stats_pre": rnalm_params_pre,
             "rnalm_param_stats_post": rnalm_params_post,
@@ -594,6 +633,8 @@ def run_child_case(
     sample: dict[str, str],
     mode: dict[str, Any],
     output_root: Path,
+    benchmark_warmup: int = 0,
+    benchmark_repeats: int = 1,
 ) -> dict[str, Any]:
     case_dir = output_root / repo_tag / sample["tag"] / mode["tag"]
     case_dir.mkdir(parents=True, exist_ok=True)
@@ -617,6 +658,10 @@ def run_child_case(
         "true" if mode["enable"] else "false",
         "--output-dir",
         str(case_dir),
+        "--benchmark-warmup",
+        str(benchmark_warmup),
+        "--benchmark-repeats",
+        str(benchmark_repeats),
     ]
     start = time.perf_counter()
     proc = subprocess.run(
@@ -674,8 +719,12 @@ def compare_repo_pair(
         ),
         "checkpoint_missing_keys_exact_same": lhs_summary["checkpoint_load"]["missing_keys"]
         == rhs_summary["checkpoint_load"]["missing_keys"],
-        "checkpoint_unexpected_keys_exact_same": lhs_summary["checkpoint_load"]["unexpected_keys"]
-        == rhs_summary["checkpoint_load"]["unexpected_keys"],
+        "checkpoint_unexpected_keys_exact_same": (
+            lhs_summary["checkpoint_load"]["unexpected_keys_count"]
+            == rhs_summary["checkpoint_load"]["unexpected_keys_count"]
+            and lhs_summary["checkpoint_load"]["unexpected_keys_sha256"]
+            == rhs_summary["checkpoint_load"]["unexpected_keys_sha256"]
+        ),
         "timings": {
             "lhs": lhs_summary["timings"],
             "rhs": rhs_summary["timings"],
@@ -732,7 +781,8 @@ def make_report(
     lines.append(f"- Python: {sys.executable}")
     lines.append(f"- Data root: `{DATA_ROOT}`")
     lines.append(f"- Model checkpoint: `{CHECKPOINT_NAME}`")
-    lines.append("- Execution mode: GPU, fp32, `triangle_attention=torch`, `triangle_multiplicative=torch`, `N_cycle=1`, `N_step=2`, `N_sample=1`, `mc_dropout=0`, crop disabled")
+    lines.append("- Execution mode: GPU, fp32, `triangle_attention=torch`, `triangle_multiplicative=torch`, `N_cycle=1`, `N_step=2`, `N_sample=1`, crop disabled")
+    lines.append("- Minimal-instance block counts: template=0, msa=1, pairformer=2, diffusion(atom/transformer/decoder)=1/2/1, confidence=1")
     lines.append("")
     lines.append("## Verdict")
     lines.append("")
@@ -781,6 +831,141 @@ def make_report(
     lines.append("- Performance numbers are minimal-instance timings, useful for relative comparison only.")
     lines.append("")
     return "\n".join(lines)
+
+
+def find_sample(sample_tag: str) -> dict[str, str]:
+    for sample in SAMPLES:
+        if sample["tag"] == sample_tag:
+            return sample
+    raise KeyError(f"Unknown sample tag: {sample_tag}")
+
+
+def find_mode(mode_tag: str) -> dict[str, Any]:
+    for mode in MODES:
+        if mode["tag"] == mode_tag:
+            return mode
+    raise KeyError(f"Unknown mode tag: {mode_tag}")
+
+
+def make_benchmark_report(
+    sample: dict[str, str],
+    mode: dict[str, Any],
+    summaries: dict[str, dict[str, Any]],
+    comparison: dict[str, Any],
+) -> str:
+    new_timings = summaries["protenix_new"]["timings"]
+    pro_timings = summaries["protenix_pro"]["timings"]
+    median_delta_s = pro_timings["forward_median_s"] - new_timings["forward_median_s"]
+    median_delta_pct = (
+        (median_delta_s / new_timings["forward_median_s"]) * 100.0
+        if new_timings["forward_median_s"] != 0
+        else 0.0
+    )
+
+    lines: list[str] = []
+    lines.append("# RNALM Fixed-Case Benchmark")
+    lines.append("")
+    lines.append(f"- Date: 2026-03-24")
+    lines.append(f"- Sample: `{sample['tag']}`")
+    lines.append(f"- RNALM mode: `{mode['tag']}`")
+    lines.append(f"- Data root: `{DATA_ROOT}`")
+    lines.append(f"- GPU: {next(iter(summaries.values()))['gpu_name']}")
+    lines.append(f"- Warmup runs: {next(iter(summaries.values()))['benchmark']['warmup_runs']}")
+    lines.append(f"- Timed runs: {next(iter(summaries.values()))['benchmark']['repeats']}")
+    lines.append("")
+    lines.append("## Timing Table")
+    lines.append("")
+    lines.append("| Repo | dataset_item_load_s | pairformer_s | forward_mean_s | forward_median_s | forward_std_s | forward_p05_s | forward_p95_s | forward_min_s | forward_max_s |")
+    lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+    for repo in REPOS:
+        summary = summaries[repo["tag"]]
+        timings = summary["timings"]
+        lines.append(
+            f"| {repo['tag']} | "
+            f"{timings['dataset_item_load_s']:.6f} | "
+            f"{timings['pairformer_s']:.6f} | "
+            f"{timings['forward_avg_s']:.6f} | "
+            f"{timings['forward_median_s']:.6f} | "
+            f"{timings['forward_std_s']:.6f} | "
+            f"{timings['forward_p05_s']:.6f} | "
+            f"{timings['forward_p95_s']:.6f} | "
+            f"{timings['forward_min_s']:.6f} | "
+            f"{timings['forward_max_s']:.6f} |"
+        )
+    lines.append("")
+    lines.append("## Repo Delta")
+    lines.append("")
+    lines.append(f"- forward median delta (`protenix_pro - protenix_new`): {median_delta_s:.6f} s")
+    lines.append(f"- forward median delta percent vs `protenix_new`: {median_delta_pct:.2f}%")
+    lines.append("")
+    lines.append("## Numerical Check")
+    lines.append("")
+    lines.append(f"- raw data equal: {comparison['raw_input_feature_dict']['exact_same']}")
+    lines.append(f"- prepared model input equal: {comparison['prepared_input_feature_dict']['exact_same']}")
+    lines.append(f"- pairformer exact same: {comparison['pairformer']['exact_same']}")
+    lines.append(f"- pairformer max abs diff: {comparison['pairformer']['max_abs_diff']}")
+    lines.append(f"- prediction exact same: {comparison['prediction']['exact_same']}")
+    lines.append(f"- prediction max abs diff: {comparison['prediction']['max_abs_diff']}")
+    lines.append("")
+    lines.append("## Note")
+    lines.append("")
+    lines.append("- This benchmark fixes one case and repeats the same GPU forward path many times to reduce one-shot timing noise.")
+    return "\n".join(lines)
+
+
+def benchmark_main(
+    sample_tag: str,
+    mode_tag: str,
+    benchmark_warmup: int,
+    benchmark_repeats: int,
+) -> None:
+    sample = find_sample(sample_tag)
+    mode = find_mode(mode_tag)
+    bench_root = OUTPUT_ROOT / f"benchmark_{sample_tag}_{mode_tag}_r{benchmark_repeats}"
+    bench_root.mkdir(parents=True, exist_ok=True)
+    python_bin = sys.executable
+
+    summaries: dict[str, dict[str, Any]] = {}
+    for repo in REPOS:
+        print(
+            f"[BENCH] repo={repo['tag']} sample={sample_tag} mode={mode_tag} warmup={benchmark_warmup} repeats={benchmark_repeats}",
+            flush=True,
+        )
+        summaries[repo["tag"]] = run_child_case(
+            python_bin=python_bin,
+            repo_tag=repo["tag"],
+            repo_dir=repo["path"],
+            sample=sample,
+            mode=mode,
+            output_root=bench_root,
+            benchmark_warmup=benchmark_warmup,
+            benchmark_repeats=benchmark_repeats,
+        )
+
+    comparison = compare_repo_pair(
+        summaries["protenix_new"],
+        summaries["protenix_pro"],
+    )
+    report = {
+        "metadata": {
+            "date": "2026-03-24",
+            "sample": sample,
+            "mode": mode,
+            "benchmark_warmup": benchmark_warmup,
+            "benchmark_repeats": benchmark_repeats,
+        },
+        "summaries": summaries,
+        "comparison": comparison,
+    }
+    json_path = bench_root / f"rnalm_benchmark_{sample_tag}_{mode_tag}_r{benchmark_repeats}.json"
+    md_path = bench_root / f"RNALM_BENCHMARK_{sample_tag}_{mode_tag}_r{benchmark_repeats}.md"
+    json_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    md_path.write_text(
+        make_benchmark_report(sample, mode, summaries, comparison),
+        encoding="utf-8",
+    )
+    print(f"[DONE] Benchmark JSON: {json_path}")
+    print(f"[DONE] Benchmark Markdown: {md_path}")
 
 
 def master_main() -> None:
@@ -864,6 +1049,13 @@ def main() -> None:
     args = parser.parse_args()
     if args.child:
         child_main(args)
+    elif args.benchmark:
+        benchmark_main(
+            sample_tag=args.benchmark_sample_tag,
+            mode_tag=args.benchmark_mode_tag,
+            benchmark_warmup=args.benchmark_warmup,
+            benchmark_repeats=args.benchmark_repeats,
+        )
     else:
         master_main()
 
