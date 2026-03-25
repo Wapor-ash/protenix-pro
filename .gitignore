@@ -3,6 +3,26 @@
 *.py[cod]
 *$py.class
 
+# 忽略所有 PyTorch 权重文件
+*.pt
+*.pth
+*.ckpt
+
+# 忽略整个 checkpoints 和输出文件夹
+checkpoints/
+output/
+logs/
+wandb/
+
+# 忽略大型数据集和中间特征
+*.csv
+*.h5
+*.npy
+dataset/
+mmcif/
+examples/
+report/
+
 # C extensions
 *.so
 *.o
