@@ -22,6 +22,7 @@ dataset/
 mmcif/
 examples/
 report/
+rna_database/
 
 # C extensions
 *.so
